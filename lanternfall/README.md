@@ -1,4 +1,4 @@
-# Lanternfall â€” Rooms 1 & 2 ("The Lantern Steps", "The Beacon Span")
+# Lanternfall — Rooms 1 & 2 (""The Lantern Steps"", ""The Beacon Span"")
 
 A low-poly puzzle-platformer. Hidden platforms exist only where your lantern's light reaches.
 
@@ -10,10 +10,10 @@ A low-poly puzzle-platformer. Hidden platforms exist only where your lantern's l
     npm run lint     # ESLint
 
 ## Controls
-W A S D move Â· Space jump Â· Q lantern pulse Â· drag mouse or â† â†’ turn camera Â· scroll zoom Â· R back to checkpoint Â· Esc pause Â· M mute
+W A S D move · Space jump · Q lantern pulse · drag mouse or ? ? turn camera · scroll zoom · R back to checkpoint · Esc pause · M mute
 
 ## The lantern rule (src/world/LightReveal.ts)
-A hidden platform is *lit* when the lantern is within `radius` of the platform's nearest point.
+A hidden platform is *lit* when the lantern is within adius of the platform's nearest point.
 Lit platforms are visible and solid. When the light leaves they stay solid for 0.6 s, then vanish.
 Held radius = 3 m. Pulse (Q) = 12 m for 3 s, 5 s cooldown: use it to scout gaps the held light can't reach.
 Note: a blind leap can still work, because the platform appears as you get close. The pulse is a scouting aid, not a lock.
@@ -23,14 +23,14 @@ Some bridge stones are *locked*: the lantern cannot reveal them. Walk to the cry
 within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept across respawns).
 
 ## Tuning with data
-The win screen shows the platform you fell from most ("Most falls: leaving H5"). Use it to find unfair jumps.
+The win screen shows the platform you fell from most (""Most falls: leaving H5""). Use it to find unfair jumps.
 
 ## Structure
 - src/core: Game (loop, wiring), GameState (menu/playing/paused/won), EventBus, dispose helper
 - src/physics: aabb (box maths), PlayerBody (gravity, jump, collision; no graphics)
 - src/world: LevelData (platform layout), LightReveal (the rule), Level (meshes), Environment (sky, lights, ruins), Tower
 - src/player: Player (visible character + lantern), ThirdPersonCamera (follow camera)
-- src/audio: Synth (all sounds generated live, no audio files) Â· src/fx: Sparkles Â· src/ui: Hud Â· src/input: Input
+- src/audio: Synth (all sounds generated live, no audio files) · src/fx: Sparkles · src/ui: Hud · src/input: Input
 - tests: GameState, EventBus, PlayerBody, LightReveal, Level (includes a bot that completes the route)
 
 ## Design decision: no Rapier yet
