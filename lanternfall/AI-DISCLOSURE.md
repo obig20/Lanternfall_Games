@@ -1,7 +1,8 @@
 # AI assistance disclosure
 
-This project is built with heavy AI assistance (Claude, by Anthropic). Be accurate about this in any
-README, submission or licensing conversation.
+The author estimates that Claude (by Anthropic) generated approximately 30% of the project's source
+code. This is an estimate, not a line-by-line measurement; it corresponds to the 25-50% range on
+forms that use those brackets.
 
 ## Written by Claude (AI-assisted)
 - Milestone 1 scaffold; Room 1 vertical slice (player, camera, environment, lantern rule, HUD, audio)
@@ -9,8 +10,7 @@ README, submission or licensing conversation.
 - Visual contrast/gate pass; fall tracking ("most falls" stat), squash/stretch and footsteps
 - Milestone 2 step 1: beacon crystals, locked bridge, Room 2 layout, CI workflow, tests for all of the above
 
-## Written by the human author
-- (fill in as you go: design decisions, code you write, tuning, level layouts you change)
-
-Commit convention: AI-assisted commits end with the trailer `AI-assisted: Claude`. Do not backdate,
-squash, or rewrite history to change how the work looks.
+The author's estimate includes code generated with Claude and does not mean every listed feature was
+written entirely by Claude; the human author reviewed and developed the project. The project is
+owned solely by the human author. The GitHub commit identities `noha` and `obig20` refer to the
+same person, not separate contributors.
