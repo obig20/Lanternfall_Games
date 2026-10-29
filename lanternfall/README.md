@@ -44,3 +44,5 @@ built or run by the author tooling (sandbox had no network). Run the commands ab
 ## Known limitations
 - One room only. Hidden platforms cannot be re-lit while you stand inside them (not needed in Room 1).
 - Camera does not collide with geometry. No gamepad/touch support.
+
+Commit 1
