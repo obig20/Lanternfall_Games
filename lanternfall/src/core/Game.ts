@@ -200,7 +200,7 @@ export class Game {
     this.level.update(dt, this.elapsed, this.reveal);
     this.sparkles.update(dt);
     this.env.update(target, this.elapsed);
-    this.rig.update(dt, target);
+    this.rig.update(dt, target, this.level.solids(this.reveal));
     this.hud.setPulse(this.lantern.charge, this.lantern.pulsing);
 
     this.renderer.render(this.scene, this.camera);

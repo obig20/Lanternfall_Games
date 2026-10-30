@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { Box } from '../physics/aabb';
+import { clipRay } from '../physics/raycast';
 
 /**
  * Camera that follows the player from behind and above.
@@ -13,6 +15,8 @@ export class ThirdPersonCamera {
   private readonly focus = new THREE.Vector3();
   private readonly smoothPos = new THREE.Vector3();
   private initialised = false;
+  /** Smoothed distance after wall clipping: pulls in instantly, eases back out. */
+  private clipDist = Infinity;
 
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
@@ -37,8 +41,8 @@ export class ThirdPersonCamera {
     this.yaw += delta;
   }
 
-  /** Follow `target` (the player's centre). */
-  update(dt: number, target: THREE.Vector3): void {
+  /** Follow `target` (the player's centre). `obstacles` keep the camera from pushing through platforms. */
+  update(dt: number, target: THREE.Vector3, obstacles: readonly Box[] = []): void {
     this.focus.set(target.x, target.y + 0.6, target.z);
     const cp = Math.cos(this.pitch);
     const desired = new THREE.Vector3(
@@ -52,13 +56,29 @@ export class ThirdPersonCamera {
     }
     // Frame-rate independent smoothing: the camera trails slightly behind the player.
     this.smoothPos.lerp(desired, 1 - Math.exp(-9 * dt));
-    this.camera.position.copy(this.smoothPos);
+    this.camera.position.copy(this.clipToObstacles(dt, obstacles));
     this.camera.lookAt(this.focus);
   }
 
   /** Snap (no smoothing) on the next update, e.g. after a respawn. */
   snap(): void {
     this.initialised = false;
+    this.clipDist = Infinity;
+  }
+
+  /** Shorten the focus -> camera arm so it stops in front of any platform it would pass through. */
+  private clipToObstacles(dt: number, obstacles: readonly Box[]): THREE.Vector3 {
+    const arm = this.smoothPos.clone().sub(this.focus);
+    const len = arm.length();
+    if (len < 1e-4 || obstacles.length === 0) {
+      this.clipDist = Infinity;
+      return this.smoothPos;
+    }
+    const dir = arm.divideScalar(len);
+    const free = clipRay(this.focus, dir, len, obstacles);
+    if (free < this.clipDist) this.clipDist = free;
+    else this.clipDist = Math.min(free, this.clipDist + (free - this.clipDist) * (1 - Math.exp(-6 * dt)));
+    return this.focus.clone().addScaledVector(dir, Math.min(len, this.clipDist));
   }
 
   private onDown = (): void => { this.dragging = true; };
