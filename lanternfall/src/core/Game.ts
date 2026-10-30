@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Synth } from '../audio/Synth';
 import { Sparkles } from '../fx/Sparkles';
 import { Input } from '../input/Input';
+import { TouchControls } from '../input/TouchControls';
 import { CharacterModel } from '../player/CharacterModel';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
@@ -57,6 +58,7 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private unsubscribeSettings: () => void = () => {};
+  private readonly touch: TouchControls | null;
 
   private respawnPoint: { x: number; y: number; z: number } = { ...SPAWN };
   private activeCheckpoint: string | null = null;
@@ -87,6 +89,7 @@ export class Game {
     this.rig = new ThirdPersonCamera(this.camera, this.renderer.domElement);
 
     this.hud = new Hud(container);
+    this.touch = TouchControls.isSupported() ? new TouchControls(container, () => this.togglePause()) : null;
     this.hud.onStart = () => this.begin();
     this.hud.onResume = () => this.togglePause();
     this.hud.onRestart = () => this.restart();
@@ -199,13 +202,18 @@ export class Game {
     this.lastTime = t;
     this.elapsed += dt;
 
+    this.input.pollPad();
     this.handleKeys();
+    this.touch?.setVisible(this.state.phase === 'playing');
 
     if (this.state.phase === 'playing') {
       if (this.input.down('ArrowLeft')) this.rig.rotate(-1.8 * dt);
       if (this.input.down('ArrowRight')) this.rig.rotate(1.8 * dt);
       if (this.input.pressed('Space')) this.jumpQueued = true;
-      if (this.input.pressed('KeyQ')) this.pulseQueued = true;
+      if (this.input.pressed('KeyQ') || this.touch?.consumePulse()) this.pulseQueued = true;
+      if (this.touch?.consumeJump()) this.jumpQueued = true;
+      const pad = this.input.pad;
+      if (pad.lookX !== 0 || pad.lookY !== 0) this.rig.look(pad.lookX * 500 * dt, pad.lookY * 350 * dt);
 
       this.accumulator += dt;
       while (this.accumulator >= STEP) {
@@ -265,8 +273,12 @@ export class Game {
     // 3. Movement relative to the camera
     const f = this.rig.forward();
     const r = this.rig.right();
-    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0);
-    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0);
+    // Keyboard, gamepad stick and touch stick all add up; the body caps the total at length 1.
+    const pad = this.input.pad;
+    const tx = this.touch?.moveX ?? 0;
+    const tz = this.touch?.moveZ ?? 0;
+    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
+    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
     const ev = body.step(
       dt,
       { moveX: r.x * ix + f.x * iz, moveZ: r.z * ix + f.z * iz, jumpPressed: this.jumpQueued },
@@ -344,6 +356,7 @@ export class Game {
     this.input.dispose();
     this.audio.dispose();
     this.unsubscribeSettings();
+    this.touch?.dispose();
     this.hud.dispose();
     this.sparkles.dispose();
     this.player.dispose();

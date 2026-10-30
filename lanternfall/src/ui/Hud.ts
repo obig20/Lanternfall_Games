@@ -24,6 +24,8 @@ export class Hud {
             <li><b>Space</b> jump</li>
             <li><b>Q</b> lantern pulse (reveals far platforms)</li>
             <li><b>Drag mouse</b> or <b>← →</b> turn camera</li>
+            <li><b>Gamepad</b> left stick move &middot; A jump &middot; X pulse &middot; right stick camera</li>
+            <li><b>Touch</b> on-screen stick and buttons</li>
             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
           </ul>
           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>

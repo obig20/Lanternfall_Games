@@ -7,7 +7,7 @@
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #0e0a3a; }
       #app { position: fixed; inset: 0; }
-      #app canvas { display: block; cursor: grab; }
+      #app canvas { display: block; cursor: grab; touch-action: none; }
 
       .hud-root { position: absolute; inset: 0; pointer-events: none; font-family: system-ui, "Segoe UI", sans-serif; color: #f4efff; }
       .hud-root .hidden { display: none !important; }
@@ -44,6 +44,16 @@
       .settings input[type=range] { width: 180px; accent-color: #ffd36b; }
       .settings .check { justify-content: flex-start; gap: 8px; }
       .best { margin: 4px 0 0; color: #ffd36b; font-size: 14px; min-height: 1.2em; }
+      .touch-controls { position: absolute; inset: 0; pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+      .touch-controls.hidden { display: none; }
+      .t-stick { position: absolute; left: 28px; bottom: 28px; width: 128px; height: 128px; border-radius: 50%; pointer-events: auto; touch-action: none;
+                 background: rgba(24,16,70,.45); border: 2px solid rgba(255,211,107,.45); display: flex; align-items: center; justify-content: center; }
+      .t-knob { width: 56px; height: 56px; border-radius: 50%; background: rgba(255,211,107,.7); box-shadow: 0 0 16px rgba(255,211,107,.5); }
+      .touch-controls .t-btn { position: absolute; pointer-events: auto; touch-action: none; margin: 0; padding: 0; width: 84px; height: 84px; border-radius: 50%; font-size: 14px; letter-spacing: .04em;
+                                background: rgba(255,211,107,.75); }
+      .t-jump { right: 28px; bottom: 28px; }
+      .t-pulse { right: 128px; bottom: 60px; width: 68px !important; height: 68px !important; }
+      .t-pause { right: 16px; top: 16px; width: 44px !important; height: 44px !important; font-size: 16px !important; }
       .flash { position: absolute; inset: 0; background: #0e0a3a; opacity: 0; transition: opacity .25s; }
       .flash.on { opacity: .85; transition: none; }
     </style>
