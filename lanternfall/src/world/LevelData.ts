@@ -44,11 +44,45 @@ export const PLATFORMS: readonly PlatformDef[] = [
   p('L1', true, 2.5, 7.8, -70, 3, 3, true),
   p('L2', true, 2.5, 8.4, -75.5, 3, 3, true),
   p('L3', true, 2.5, 9.0, -81, 3, 3, true),
-  p('G2', false, 2.5, 9.6, -88, 6, 6),
+  p('G2', false, 2.5, 9.6, -88, 6, 6), // checkpoint 3: the gallery entrance
+
+  // Room 3, "The Drifting Gallery": M1, M2 and V1 move (see MOVERS below).
+  p('R3a', false, 2.5, 11.4, -106, 4, 4), // checkpoint 4: a rest stop between the drifting stones and the lift
+  p('G3', false, 2.5, 14.8, -118, 6, 6), // the golden gate
+];
+
+/** A platform that slides back and forth along a straight line. Positions are the centre of its TOP surface. */
+export interface MoverDef {
+  id: string;
+  /** Hidden movers are only solid while lit, exactly like hidden platforms. */
+  hidden: boolean;
+  from: { x: number; topY: number; z: number };
+  to: { x: number; topY: number; z: number };
+  w: number;
+  d: number;
+  /** Metres per second while travelling. */
+  speed: number;
+  /** Seconds it waits at each end. */
+  pause: number;
+  /** Seconds added to the clock, so neighbouring movers are out of step with each other. */
+  phase: number;
+}
+
+/**
+ * Room 3. M1 and M2 drift sideways across the gap (M2 is dark: light it to make it solid).
+ * V1 is a lift: it only reaches the gate's height at the top of its ride.
+ */
+export const MOVERS: readonly MoverDef[] = [
+  { id: 'M1', hidden: false, from: { x: 2.5, topY: 10.2, z: -94.5 }, to: { x: -5.5, topY: 10.2, z: -94.5 }, w: 3, d: 3, speed: 2.4, pause: 1.2, phase: 0 },
+  { id: 'M2', hidden: true, from: { x: -5.5, topY: 10.8, z: -100 }, to: { x: 2.5, topY: 10.8, z: -100 }, w: 3, d: 3, speed: 2.4, pause: 1.2, phase: 1 },
+  { id: 'V1', hidden: false, from: { x: 2.5, topY: 11.4, z: -111.5 }, to: { x: 2.5, topY: 14.2, z: -111.5 }, w: 3, d: 3, speed: 1.4, pause: 1.5, phase: 0 },
 ];
 
 /** Order the player is expected to travel. */
 export const ROUTE: readonly string[] = ['S', 'A', 'B', 'H1', 'H2', 'H3', 'C1', 'H4', 'H5', 'H6', 'G', 'R2a', 'L1', 'L2', 'L3', 'G2'];
+
+/** Room 3 route. Entries may be static platforms (PLATFORMS) or movers (MOVERS). */
+export const ROUTE_3: readonly string[] = ['G2', 'M1', 'M2', 'R3a', 'V1', 'G3'];
 
 export function platformBox(d: PlatformDef): Box {
   return {
@@ -81,8 +115,10 @@ export interface TriggerDef {
 export const CHECKPOINTS: readonly TriggerDef[] = [
   { id: 'C1', x: -4, y: 3.6, z: -37.5, radius: 2.6 },
   { id: 'C2', x: 2.5, y: 6.6, z: -57, radius: 2.6 },
+  { id: 'C3', x: 2.5, y: 9.6, z: -88, radius: 2.6 },
+  { id: 'C4', x: 2.5, y: 11.4, z: -106, radius: 1.8 },
 ];
-export const GOAL: TriggerDef = { id: 'GOAL', x: 2.5, y: 9.6, z: -88, radius: 1.8 };
+export const GOAL: TriggerDef = { id: 'GOAL', x: 2.5, y: 14.8, z: -118, radius: 1.8 };
 
 /** A beacon crystal: a pulse fired close enough wakes it and permanently reveals `unlocks`. */
 export interface BeaconDef {

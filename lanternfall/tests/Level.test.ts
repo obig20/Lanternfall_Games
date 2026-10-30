@@ -235,9 +235,17 @@ describe('checkpoint and goal triggers', () => {
     expect(inTrigger(feetOn('C1'), CHECKPOINTS[1])).toBe(false);
   });
 
-  it('goal triggers on G only, and not when far below', () => {
-    expect(inTrigger(feetOn('G2'), GOAL)).toBe(true);
-    expect(inTrigger(feetOn('G'), GOAL)).toBe(false);
+  it('Room 3 checkpoints trigger on G2 and R3a only', () => {
+    expect(inTrigger(feetOn('G2'), CHECKPOINTS[2])).toBe(true);
+    expect(inTrigger(feetOn('R3a'), CHECKPOINTS[3])).toBe(true);
+    expect(inTrigger(feetOn('R3a'), CHECKPOINTS[2])).toBe(false);
+    expect(inTrigger(feetOn('G'), CHECKPOINTS[2])).toBe(false);
+  });
+
+  it('goal triggers on G3 only, and not when far below', () => {
+    expect(inTrigger(feetOn('G3'), GOAL)).toBe(true);
+    expect(inTrigger(feetOn('G2'), GOAL)).toBe(false);
+    expect(inTrigger(feetOn('R3a'), GOAL)).toBe(false);
     expect(inTrigger(feetOn('L3'), GOAL)).toBe(false);
     expect(inTrigger({ x: GOAL.x, y: GOAL.y - 10, z: GOAL.z }, GOAL)).toBe(false);
   });
