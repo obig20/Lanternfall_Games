@@ -12,8 +12,9 @@ import { Level } from '../world/Level';
 import { Lantern, RevealTracker } from '../world/LightReveal';
 import {
   BEACONS, BeaconDef, CHECKPOINTS, GOAL, KILL_Y, PLATFORMS, SPAWN, TriggerDef,
-  inTrigger, platformById, platformUnder, pulseReaches, respawnPosition,
+  MOVERS, inTrigger, platformById, platformUnder, pulseReaches, respawnPosition,
 } from '../world/LevelData';
+import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
 import { Records, formatTime } from './Records';
@@ -34,7 +35,8 @@ const CHARACTER_ASSETS = {
 const RUN_ID = 'tower';
 const OBJ_START = 'Reach the golden gate';
 const OBJ_BEACON = 'Find the crystal and wake it with a pulse (Q)';
-const OBJ_BRIDGE = 'Cross the light bridge to the gate';
+const OBJ_BRIDGE = 'Cross the light bridge';
+const OBJ_GALLERY = 'Ride the drifting stones to the golden gate';
 
 /** Owns the renderer and the main loop; wires every system together. */
 export class Game {
@@ -64,6 +66,8 @@ export class Game {
   private activeCheckpoint: string | null = null;
   private stats = { time: 0, falls: 0 };
   private accumulator = 0;
+  /** Simulation clock for moving platforms: advances only while playing. */
+  private moverTime = 0;
   private lastTime = -1;
   private elapsed = 0;
   private jumpQueued = false;
@@ -154,6 +158,7 @@ export class Game {
     this.hud.setObjective(OBJ_START);
     this.hud.setCheckpoint('start');
     this.stats = { time: 0, falls: 0 };
+    this.moverTime = 0;
     this.fallLog.reset();
     this.placePlayer();
     if (this.state.transition('playing')) this.hud.showWin(false);
@@ -228,10 +233,10 @@ export class Game {
     const bodyPos = this.player.body.pos;
     const target = new THREE.Vector3(bodyPos.x, bodyPos.y, bodyPos.z);
     this.player.updateVisual(dt, this.elapsed, this.lantern.radius, this.lantern.pulsing);
-    this.level.update(dt, this.elapsed, this.reveal);
+    this.level.update(dt, this.elapsed, this.reveal, this.moverTime);
     this.sparkles.update(dt);
     this.env.update(target, this.elapsed);
-    this.rig.update(dt, target, this.level.solids(this.reveal));
+    this.rig.update(dt, target, [...this.level.solids(this.reveal), ...this.level.moverSolids(this.reveal, this.moverTime)]);
     this.hud.setPulse(this.lantern.charge, this.lantern.pulsing);
 
     this.renderer.render(this.scene, this.camera);
@@ -262,12 +267,17 @@ export class Game {
     }
 
     // 2. Which hidden platforms does the light reach? (rules live in LightReveal.ts)
-    const change = this.reveal.update(dt, this.level.hidden, this.player.lanternPos, this.lantern.radius);
+    const clockBefore = this.moverTime;
+    this.moverTime += dt;
+    const change = this.reveal.update(dt, this.level.hiddenNow(this.moverTime), this.player.lanternPos, this.lantern.radius);
     for (const id of change.revealed) {
-      const def = platformById(id);
+      const mover = MOVERS.find((m) => m.id === id);
+      const spot = mover ? moverTop(mover, this.moverTime) : null;
+      const def = spot ? null : platformById(id);
       this.level.pop(id);
       this.audio.reveal();
-      this.sparkles.burst(def.cx, def.topY + 0.3, def.cz, 22, GOLD, 2, 2.5);
+      if (spot) this.sparkles.burst(spot.x, spot.topY + 0.3, spot.z, 22, GOLD, 2, 2.5);
+      else if (def) this.sparkles.burst(def.cx, def.topY + 0.3, def.cz, 22, GOLD, 2, 2.5);
     }
 
     // 3. Movement relative to the camera
@@ -279,10 +289,12 @@ export class Game {
     const tz = this.touch?.moveZ ?? 0;
     const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
     const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
+    // Moving platforms: carry the rider, push the player out of anything that slid into them.
+    const movers = applyMovers(body, MOVERS, clockBefore, this.moverTime, (id) => this.reveal.isSolid(id) || !this.level.isHiddenMover(id));
     const ev = body.step(
       dt,
       { moveX: r.x * ix + f.x * iz, moveZ: r.z * ix + f.z * iz, jumpPressed: this.jumpQueued },
-      this.level.solids(this.reveal),
+      [...this.level.solids(this.reveal), ...movers],
     );
     this.jumpQueued = false;
     if (ev.jumped) {
@@ -297,7 +309,8 @@ export class Game {
 
     // Remember the last platform we stood on (for the "toughest jump" stat) and play footsteps.
     if (body.grounded) {
-      this.lastPlatform = platformUnder({ x: body.pos.x, y: body.feetY, z: body.pos.z }, PLATFORMS) ?? this.lastPlatform;
+      const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
+      this.lastPlatform = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime) ?? this.lastPlatform;
       this.stepTimer -= dt;
       if (this.stepTimer <= 0 && Math.hypot(body.vel.x, body.vel.z) > 2) {
         this.audio.step();
@@ -306,9 +319,9 @@ export class Game {
     }
 
     // 4. Checkpoints, goal, falling
-    const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
-    CHECKPOINTS.forEach((c, i) => this.tryCheckpoint(c, i, feet));
-    if (inTrigger(feet, GOAL)) this.win();
+    const feetNow = { x: body.pos.x, y: body.feetY, z: body.pos.z };
+    CHECKPOINTS.forEach((c, i) => this.tryCheckpoint(c, i, feetNow));
+    if (inTrigger(feetNow, GOAL)) this.win();
     else if (body.pos.y < KILL_Y) this.respawn(true);
   }
 
@@ -322,6 +335,7 @@ export class Game {
     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
     this.hud.toast('Checkpoint reached');
     if (c.id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
+    if (c.id === 'C3') this.hud.setObjective(OBJ_GALLERY);
   }
 
   /** A pulse reached a crystal: wake it and make its bridge permanently solid. */

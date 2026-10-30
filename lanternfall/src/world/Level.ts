@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { disposeObject } from '../core/dispose';
 import { Box } from '../physics/aabb';
 import { HiddenPlatform, RevealTracker } from './LightReveal';
-import { BEACONS, CHECKPOINTS, GOAL, PLATFORMS, PlatformDef, PLATFORM_THICKNESS, platformBox } from './LevelData';
+import { BEACONS, CHECKPOINTS, GOAL, MOVERS, MoverDef, PLATFORMS, PlatformDef, PLATFORM_THICKNESS, platformBox } from './LevelData';
+import { moverBox, moverTop } from './MovingPlatform';
 
 const STONE = 0xcdb9a3; // warm sandstone: stands out against the cool violet world
 const MOSS = 0x56d4a4;
@@ -14,6 +15,13 @@ interface HiddenView {
   body: THREE.MeshStandardMaterial;
   ghost: THREE.LineSegments;
   pop: number;
+}
+
+interface MoverView {
+  def: MoverDef;
+  group: THREE.Group;
+  /** Dotted outline of a hidden mover (null for visible ones). */
+  ghost: THREE.LineSegments | null;
 }
 
 interface CheckpointView {
@@ -30,7 +38,7 @@ interface BeaconView {
   baseY: number;
 }
 
-/** Builds the meshes for Room 1 from LevelData and animates them. Collision is NOT done here. */
+/** Builds the meshes for every room from LevelData and animates them. Collision is NOT done here. */
 export class Level {
   readonly group = new THREE.Group();
   readonly hidden: HiddenPlatform[];
@@ -38,6 +46,7 @@ export class Level {
   private readonly hiddenViews = new Map<string, HiddenView>();
   private readonly checkpoints: CheckpointView[] = [];
   private readonly beacons: BeaconView[] = [];
+  private readonly moverViews: MoverView[] = [];
   private readonly goalRing: THREE.Mesh;
   private readonly goalBeam: THREE.Mesh;
   private readonly goalPortal: THREE.Mesh;
@@ -50,6 +59,7 @@ export class Level {
       if (def.hidden) this.buildHidden(def);
       else this.buildSolid(def);
     }
+    for (const m of MOVERS) this.buildMover(m);
     for (const c of CHECKPOINTS) this.buildCheckpoint(c.id, c.x, c.y, c.z);
     for (const b of BEACONS) this.buildBeacon(b.id, b.x, b.y, b.z);
 
@@ -74,7 +84,22 @@ export class Level {
     this.group.add(this.goalRing, this.goalPortal, this.goalBeam, goalLight);
   }
 
-  /** Boxes the player can currently collide with. */
+  /** Hidden platforms and hidden movers, with each mover's box at time `t`. This is what the lantern tests against. */
+  hiddenNow(t: number): HiddenPlatform[] {
+    const movers = MOVERS.filter((m) => m.hidden).map((m) => ({ id: m.id, box: moverBox(m, t) }));
+    return [...this.hidden, ...movers];
+  }
+
+  isHiddenMover(id: string): boolean {
+    return MOVERS.some((m) => m.id === id && m.hidden);
+  }
+
+  /** Boxes of the movers the player can stand on at time `t` (hidden ones only while lit). */
+  moverSolids(reveal: RevealTracker, t: number): Box[] {
+    return MOVERS.filter((m) => !m.hidden || reveal.isSolid(m.id)).map((m) => moverBox(m, t));
+  }
+
+  /** Boxes the player can currently collide with (everything except movers, see moverSolids). */
   solids(reveal: RevealTracker): Box[] {
     const out = [...this.staticBoxes];
     for (const h of this.hidden) if (reveal.isSolid(h.id)) out.push(h.box);
@@ -108,7 +133,7 @@ export class Level {
     }
   }
 
-  update(dt: number, time: number, reveal: RevealTracker): void {
+  update(dt: number, time: number, reveal: RevealTracker, moverTime = 0): void {
     for (const b of this.beacons) {
       b.crystal.rotation.y = time * 1.1;
       b.crystal.position.y = b.baseY + Math.sin(time * 1.8) * 0.12;
@@ -124,6 +149,11 @@ export class Level {
       v.body.emissiveIntensity = glow * 0.35;
       v.group.scale.y = 1 + v.pop * 0.35;
       (v.ghost.material as THREE.LineBasicMaterial).opacity = vis > 0.5 ? 0 : 0.2 + Math.sin(time * 2.5) * 0.06;
+    }
+    for (const v of this.moverViews) {
+      const c = moverTop(v.def, moverTime);
+      v.group.position.set(c.x, c.topY, c.z);
+      v.ghost?.position.set(c.x, c.topY - 0.04, c.z);
     }
     this.goalRing.rotation.y = time * 0.9;
     const bob = GOAL.y + 2.3 + Math.sin(time * 1.6) * 0.15;
@@ -152,14 +182,27 @@ export class Level {
     return g;
   }
 
-  private buildSolid(def: PlatformDef): void {
+  /** A mover is built like a normal platform at its start point; update() slides it along its path. */
+  private buildMover(m: MoverDef): void {
+    const def: PlatformDef = { id: m.id, hidden: m.hidden, cx: m.from.x, topY: m.from.topY, cz: m.from.z, w: m.w, d: m.d, locked: false };
+    if (m.hidden) {
+      const view = this.buildHidden(def);
+      this.moverViews.push({ def: m, group: view.group, ghost: view.ghost });
+    } else {
+      this.moverViews.push({ def: m, group: this.buildSolid(def), ghost: null });
+    }
+  }
+
+  private buildSolid(def: PlatformDef): THREE.Group {
     const body = new THREE.MeshStandardMaterial({ color: STONE, flatShading: true, roughness: 0.95 });
     // A little self-glow keeps the walkable top readable even in shadow.
     const plate = new THREE.MeshStandardMaterial({ color: MOSS, emissive: 0x1f6b50, emissiveIntensity: 0.35, flatShading: true, roughness: 0.9 });
-    this.group.add(this.slab(def, body, plate));
+    const group = this.slab(def, body, plate);
+    this.group.add(group);
+    return group;
   }
 
-  private buildHidden(def: PlatformDef): void {
+  private buildHidden(def: PlatformDef): HiddenView {
     const body = new THREE.MeshStandardMaterial({ color: 0xc9b6ff, emissive: GOLD, emissiveIntensity: 0.2, flatShading: true, transparent: true, opacity: 0 });
     const plate = new THREE.MeshStandardMaterial({ color: GOLD, emissive: GOLD, emissiveIntensity: 0.5, flatShading: true, transparent: true, opacity: 0 });
     const group = this.slab(def, body, plate);
@@ -172,7 +215,9 @@ export class Level {
     );
     edges.position.set(def.cx, def.topY - 0.04, def.cz);
     this.group.add(group, edges);
-    this.hiddenViews.set(def.id, { group, plate, body, ghost: edges, pop: 0 });
+    const view: HiddenView = { group, plate, body, ghost: edges, pop: 0 };
+    this.hiddenViews.set(def.id, view);
+    return view;
   }
 
   /** A floating crystal on a small pedestal. Dim until a pulse wakes it. */
