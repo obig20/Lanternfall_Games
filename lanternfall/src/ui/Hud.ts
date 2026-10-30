@@ -1,8 +1,11 @@
+import { SETTING_LIMITS, Settings } from '../core/Settings';
+
 /** All on-screen text and buttons. Plain DOM (no framework) so it is easy to read and change. */
 export class Hud {
   onStart: () => void = () => {};
   onResume: () => void = () => {};
   onRestart: () => void = () => {};
+  onSettings: (patch: Partial<Settings>) => void = () => {};
 
   private readonly root = document.createElement('div');
   private readonly q = <T extends HTMLElement>(sel: string): T => this.root.querySelector(sel) as T;
@@ -42,7 +45,15 @@ export class Hud {
       </div>
 
       <div class="screen hidden" id="pause-screen">
-        <div class="panel"><h2>Paused</h2><button id="btn-resume">Resume</button></div>
+        <div class="panel">
+          <h2>Paused</h2>
+          <div class="settings">
+            <label>Volume <input id="set-volume" type="range" min="${SETTING_LIMITS.volume.min}" max="${SETTING_LIMITS.volume.max}" step="0.05"></label>
+            <label>Camera speed <input id="set-sens" type="range" min="${SETTING_LIMITS.sensitivity.min}" max="${SETTING_LIMITS.sensitivity.max}" step="0.1"></label>
+            <label class="check"><input id="set-invert" type="checkbox"> Invert camera Y</label>
+          </div>
+          <button id="btn-resume">Resume</button>
+        </div>
       </div>
 
       <div class="screen hidden" id="win-screen">
@@ -50,6 +61,7 @@ export class Hud {
           <h2>The gate opens</h2>
           <p class="tag">You found the light's path through the ruins.</p>
           <p id="win-stats"></p>
+          <p id="win-best" class="best"></p>
           <button id="btn-restart">Play again</button>
         </div>
       </div>
@@ -61,6 +73,22 @@ export class Hud {
     this.q('#btn-start').addEventListener('click', this.start);
     this.q('#btn-resume').addEventListener('click', this.resume);
     this.q('#btn-restart').addEventListener('click', this.restart);
+    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).addEventListener('input', this.settingsInput);
+  }
+
+  private settingsInput = (): void => {
+    this.onSettings({
+      volume: Number(this.q<HTMLInputElement>('#set-volume').value),
+      sensitivity: Number(this.q<HTMLInputElement>('#set-sens').value),
+      invertY: this.q<HTMLInputElement>('#set-invert').checked,
+    });
+  };
+
+  /** Show the current settings in the pause panel (does not fire onSettings). */
+  setSettings(s: Readonly<Settings>): void {
+    this.q<HTMLInputElement>('#set-volume').value = String(s.volume);
+    this.q<HTMLInputElement>('#set-sens').value = String(s.sensitivity);
+    this.q<HTMLInputElement>('#set-invert').checked = s.invertY;
   }
 
   private start = (): void => this.onStart();
@@ -75,12 +103,14 @@ export class Hud {
   showHud(on: boolean): void { this.show('#hud', on); }
   showPause(on: boolean): void { this.show('#pause-screen', on); }
 
-  showWin(on: boolean, seconds = 0, falls = 0, toughest = ''): void {
+  /** `bestLine` is a second line such as "New best time!" or "Best 1:20.4 · fewest falls 2". */
+  showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = ''): void {
     if (on) {
       const m = Math.floor(seconds / 60);
       const s = Math.floor(seconds % 60).toString().padStart(2, '0');
       const extra = toughest ? `  ·  Most falls: ${toughest}` : '';
       this.q('#win-stats').textContent = `Time ${m}:${s}  ·  Falls ${falls}${extra}`;
+      this.q('#win-best').textContent = bestLine;
     }
     this.show('#win-screen', on);
   }
@@ -121,6 +151,7 @@ export class Hud {
     this.q('#btn-start').removeEventListener('click', this.start);
     this.q('#btn-resume').removeEventListener('click', this.resume);
     this.q('#btn-restart').removeEventListener('click', this.restart);
+    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).removeEventListener('input', this.settingsInput);
     this.root.remove();
   }
 }

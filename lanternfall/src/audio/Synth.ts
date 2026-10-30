@@ -4,6 +4,7 @@ export class Synth {
   private master: GainNode | null = null;
   private ambient: OscillatorNode[] = [];
   private muted = false;
+  private volume = 0.5;
 
   /** Browsers only allow audio after a click/keypress, so call this from the Start button. */
   unlock(): void {
@@ -12,7 +13,7 @@ export class Synth {
       if (!Ctor) return;
       this.ctx = new Ctor();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : 0.5;
+      this.master.gain.value = this.muted ? 0 : this.volume;
       this.master.connect(this.ctx.destination);
       this.startAmbient();
     }
@@ -21,8 +22,14 @@ export class Synth {
 
   toggleMute(): boolean {
     this.muted = !this.muted;
-    if (this.master) this.master.gain.value = this.muted ? 0 : 0.5;
+    if (this.master) this.master.gain.value = this.muted ? 0 : this.volume;
     return this.muted;
+  }
+
+  /** Master volume 0..1 (the mute toggle still wins). */
+  setVolume(v: number): void {
+    this.volume = Math.min(1, Math.max(0, v));
+    if (this.master && !this.muted) this.master.gain.value = this.volume;
   }
 
   // --- sound effects ---------------------------------------------------------

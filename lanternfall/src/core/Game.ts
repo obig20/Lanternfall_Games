@@ -15,6 +15,9 @@ import {
 } from '../world/LevelData';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
+import { Records, formatTime } from './Records';
+import { SettingsStore } from './Settings';
+import { browserStore } from './storage';
 import { GameState } from './GameState';
 
 export type GameEvents = { tick: { dt: number } };
@@ -26,6 +29,8 @@ const CHARACTER_ASSETS = {
   fbx: `${import.meta.env.BASE_URL}models/character/character.fbx`,
   baseColor: `${import.meta.env.BASE_URL}models/character/base_color.png`,
 };
+/** Run id used for saved records. One id per full route through the tower. */
+const RUN_ID = 'tower';
 const OBJ_START = 'Reach the golden gate';
 const OBJ_BEACON = 'Find the crystal and wake it with a pulse (Q)';
 const OBJ_BRIDGE = 'Cross the light bridge to the gate';
@@ -49,6 +54,9 @@ export class Game {
   private readonly lantern = new Lantern();
   private readonly reveal = new RevealTracker();
   private readonly resizeObserver: ResizeObserver;
+  private readonly settings = new SettingsStore(browserStore());
+  private readonly records = new Records(browserStore());
+  private unsubscribeSettings: () => void = () => {};
 
   private respawnPoint: { x: number; y: number; z: number } = { ...SPAWN };
   private activeCheckpoint: string | null = null;
@@ -82,12 +90,22 @@ export class Game {
     this.hud.onStart = () => this.begin();
     this.hud.onResume = () => this.togglePause();
     this.hud.onRestart = () => this.restart();
+    this.hud.onSettings = (patch) => this.settings.set(patch);
+    this.unsubscribeSettings = this.settings.onChange((v) => this.applySettings(v));
+    this.applySettings(this.settings.get());
+    this.hud.setSettings(this.settings.get());
     this.hud.showTitle(true);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.resize();
     void this.loadCharacter();
+  }
+
+  private applySettings(v: Readonly<{ volume: number; sensitivity: number; invertY: boolean }>): void {
+    this.audio.setVolume(v.volume);
+    this.rig.sensitivity = v.sensitivity;
+    this.rig.invertY = v.invertY;
   }
 
   /** Load the FBX character in the background; the built-in character is used until (or unless) it loads. */
@@ -166,7 +184,12 @@ export class Game {
     const p = this.player.body.pos;
     this.sparkles.burst(p.x, p.y, p.z, 120, GOLD, 5, 4);
     const worst = this.fallLog.worst();
-    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '');
+    const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
+    const { bestTime, fewestFalls } = out.record;
+    let bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
+    if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
+    else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
+    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine);
   }
 
   // --- main loop -------------------------------------------------------------
@@ -320,6 +343,7 @@ export class Game {
     this.rig.dispose();
     this.input.dispose();
     this.audio.dispose();
+    this.unsubscribeSettings();
     this.hud.dispose();
     this.sparkles.dispose();
     this.player.dispose();

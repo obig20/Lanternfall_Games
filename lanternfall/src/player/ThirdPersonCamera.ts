@@ -8,6 +8,9 @@ import { clipRay } from '../physics/raycast';
  * The yaw angle also defines which way "forward" is for WASD.
  */
 export class ThirdPersonCamera {
+  /** Mouse/stick turn speed multiplier and vertical inversion (set from Settings). */
+  sensitivity = 1;
+  invertY = false;
   yaw = 0; // 0 = camera sits on the +Z side, looking toward -Z (the route direction)
   private pitch = 0.42;
   private distance = 8.5;
@@ -38,7 +41,14 @@ export class ThirdPersonCamera {
   }
 
   rotate(delta: number): void {
-    this.yaw += delta;
+    this.yaw += delta * this.sensitivity;
+  }
+
+  /** Turn by raw pointer-style deltas (pixels of mouse movement, or the equivalent from a stick/touch). */
+  look(dx: number, dy: number): void {
+    this.yaw -= dx * 0.005 * this.sensitivity;
+    const v = dy * 0.004 * this.sensitivity * (this.invertY ? -1 : 1);
+    this.pitch = THREE.MathUtils.clamp(this.pitch + v, 0.12, 1.2);
   }
 
   /** Follow `target` (the player's centre). `obstacles` keep the camera from pushing through platforms. */
@@ -85,8 +95,7 @@ export class ThirdPersonCamera {
   private onUp = (): void => { this.dragging = false; };
   private onMove = (e: PointerEvent): void => {
     if (!this.dragging) return;
-    this.yaw -= e.movementX * 0.005;
-    this.pitch = THREE.MathUtils.clamp(this.pitch + e.movementY * 0.004, 0.12, 1.2);
+    this.look(e.movementX, e.movementY);
   };
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
