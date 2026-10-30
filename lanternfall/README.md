@@ -1,6 +1,8 @@
-# Lanternfall — Rooms 1 & 2 (""The Lantern Steps"", ""The Beacon Span"")
+# Lanternfall (Rooms 1, 2 & 3)
 
 A low-poly puzzle-platformer. Hidden platforms exist only where your lantern's light reaches.
+
+Rooms: **The Lantern Steps** (hidden stones), **The Beacon Span** (crystal-locked bridge), **The Drifting Gallery** (moving and dark platforms, plus a lift).
 
 ## Run
     npm install
@@ -10,10 +12,20 @@ A low-poly puzzle-platformer. Hidden platforms exist only where your lantern's l
     npm run lint     # ESLint
 
 ## Controls
-W A S D move · Space jump · Q lantern pulse · drag mouse or ? ? turn camera · scroll zoom · R back to checkpoint · Esc pause · M mute
+| | Keyboard / mouse | Gamepad | Touch |
+|---|---|---|---|
+| Move | W A S D | Left stick | On-screen stick |
+| Jump | Space | A | JUMP button |
+| Lantern pulse | Q | X, RT or RB | PULSE button |
+| Camera | Drag mouse or Left/Right arrows, scroll to zoom | Right stick | Drag anywhere else |
+| Back to checkpoint | R | Y | - |
+| Pause | Esc / P | Start | II button |
+| Mute | M | - | - |
+
+The pause screen has volume, camera speed and invert-Y settings. Settings and your best time / fewest falls are saved in the browser (localStorage). If storage is blocked the game still works and just forgets between sessions.
 
 ## The lantern rule (src/world/LightReveal.ts)
-A hidden platform is *lit* when the lantern is within adius of the platform's nearest point.
+A hidden platform is *lit* when the lantern is within `radius` of the platform's nearest point.
 Lit platforms are visible and solid. When the light leaves they stay solid for 0.6 s, then vanish.
 Held radius = 3 m. Pulse (Q) = 12 m for 3 s, 5 s cooldown: use it to scout gaps the held light can't reach.
 Note: a blind leap can still work, because the platform appears as you get close. The pulse is a scouting aid, not a lock.
@@ -22,25 +34,38 @@ Note: a blind leap can still work, because the platform appears as you get close
 Some bridge stones are *locked*: the lantern cannot reveal them. Walk to the crystal on the side ledge and pulse (Q)
 within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept across respawns).
 
+## Moving platforms (Room 3)
+Platforms M1, M2 and the lift V1 slide along fixed paths (src/world/MovingPlatform.ts). Their position is a pure function of time, with easing and a pause at each end.
+You are carried while standing on one; a platform that slides into you pushes you aside. M2 is a *dark* mover: it is only solid while your lantern lights it, like a hidden platform that also moves.
+The gate is too high to jump to from the rest stop, so the lift is required.
+
 ## Tuning with data
-The win screen shows the platform you fell from most (""Most falls: leaving H5""). Use it to find unfair jumps.
+The win screen shows the platform you fell from most ("Most falls: leaving H5"). Use it to find unfair jumps.
+For Room 3 there is also a bot (tests/helpers/room3Sim.ts) that tries every start moment in a mover's cycle; each hop must succeed from at least 25% of them. That checks the timing windows are not unfair, but it does not replace watching real players.
 
 ## Structure
-- src/core: Game (loop, wiring), GameState (menu/playing/paused/won), EventBus, dispose helper
-- src/physics: aabb (box maths), PlayerBody (gravity, jump, collision; no graphics)
-- src/world: LevelData (platform layout), LightReveal (the rule), Level (meshes), Environment (sky, lights, ruins), Tower
-- src/player: Player (visible character + lantern), ThirdPersonCamera (follow camera)
-- src/audio: Synth (all sounds generated live, no audio files) · src/fx: Sparkles · src/ui: Hud · src/input: Input
-- tests: GameState, EventBus, PlayerBody, LightReveal, Level (includes a bot that completes the route)
+- src/core: Game (loop, wiring), GameState, EventBus, FallLog, Settings, Records, storage (safe localStorage), dispose helper
+- src/physics: aabb (box maths), raycast (ray vs box, used for camera collision), PlayerBody (gravity, jump, collision; no graphics)
+- src/world: LevelData (layout, movers, checkpoints), LightReveal (the rule), MovingPlatform (movers, carrying), Level (meshes), Environment, Tower
+- src/player: Player (character + lantern), ThirdPersonCamera (follow camera with wall collision)
+- src/input: Input (keyboard + gamepad polling), GamepadMap, analog (deadzones), TouchControls
+- src/audio: Synth (all sounds generated live, no audio files) - src/fx: Sparkles - src/ui: Hud
+- tests: unit tests for the logic above, including bots that complete the route and sweep Room 3's timing
 
 ## Design decision: no Rapier yet
 Platforms are axis-aligned boxes, so a small custom collision system (PlayerBody) is simpler, deterministic and
-fully unit-tested. Rapier can be added later if rotating or sloped geometry is needed.
+fully unit-tested. Moving platforms use the same boxes, updated each physics step. Rapier can be added later if rotating or sloped geometry is needed.
 
 ## Status
-Logic (physics, lantern rule, beacons, level layout, state machine) is unit-tested (74 tests under a stand-in runner). Rendering, HUD and audio code has NOT yet been
-built or run by the author tooling (sandbox had no network). Run the commands above and report any errors.
+`npm run lint`, `npm run build` and `npm test` pass (162 tests). Tests cover the logic: physics, the lantern rule, beacons,
+moving platforms, camera ray clipping, settings, records, gamepad mapping and level layout.
+Rendering, HUD, audio, touch controls and the feel of the game are **not** covered by automated tests and need playtesting.
 
 ## Known limitations
-- One room only. Hidden platforms cannot be re-lit while you stand inside them (not needed in Room 1).
-- Camera does not collide with geometry. No gamepad/touch support.
+- Hidden platforms cannot be re-lit while you stand inside them.
+- Camera collision only considers platforms, not the decorative ruins.
+- Menus (Begin / Resume / Play again) need a mouse or touch; the gamepad does not navigate them.
+- Room 3's timing windows are checked by a bot, not by human players.
+
+## History
+The first 25 commits are batch updates ("Update 1" to "Update 19") plus documentation. From the camera-collision commit onward each feature is its own commit with a descriptive message. See AI-DISCLOSURE.md for who wrote what.
