@@ -21,6 +21,7 @@ import { HintEngine } from './Hints';
 import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
 import { SettingsStore } from './Settings';
+import { SplitBook, formatDelta } from './Splits';
 import { browserStore } from './storage';
 import { GameState } from './GameState';
 
@@ -62,6 +63,7 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private readonly hints = new HintEngine(browserStore());
+  private readonly splits = new SplitBook(browserStore(), CHECKPOINTS.length);
   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
   private unsubscribeSettings: () => void = () => {};
   private readonly touch: TouchControls | null;
@@ -417,7 +419,14 @@ export class Game {
     this.audio.checkpoint();
     this.sparkles.burst(c.x, c.y + 1, c.z, 40, GOLD, 3, 3);
     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
-    this.hud.toast('Checkpoint reached');
+    // Splits only make sense for runs that started at the beginning of the tower.
+    const split = this.stats.continued ? null : this.splits.record(index, this.stats.time);
+    if (split) {
+      const pace = split.delta === null ? 'first time here' : formatDelta(split.delta) + (split.isBest ? ' (best!)' : ' vs best');
+      this.hud.toast(`Checkpoint ${formatTime(split.time)}  ·  ${pace}`, 3);
+    } else {
+      this.hud.toast('Checkpoint reached');
+    }
     if (this.progress.reach(index)) this.refreshContinue();
     this.applyCheckpointObjective(c.id);
   }
