@@ -17,6 +17,7 @@ import {
 import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
+import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
 import { HintEngine } from './Hints';
 import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
@@ -63,6 +64,15 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private readonly hints = new HintEngine(browserStore());
+  private readonly ghostStore = new GhostStore(browserStore());
+  private readonly ghostRecorder = new GhostRecorder();
+  /** Best run so far, shown as a translucent runner. Null until a full run has been finished. */
+  private ghost: GhostTrack | null = this.ghostStore.load();
+  private ghostClock = 0;
+  private readonly ghostMesh = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.35, 1.1, 4, 12),
+    new THREE.MeshBasicMaterial({ color: 0x8fd3ff, transparent: true, opacity: 0.35, depthWrite: false }),
+  );
   private readonly splits = new SplitBook(browserStore(), CHECKPOINTS.length);
   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
   private unsubscribeSettings: () => void = () => {};
@@ -100,7 +110,8 @@ export class Game {
     container.appendChild(this.renderer.domElement);
 
     this.env = new Environment(this.scene);
-    this.scene.add(this.env.group, this.level.group, this.player.group, this.player.auraMesh, this.sparkles.points);
+    this.ghostMesh.visible = false;
+    this.scene.add(this.env.group, this.level.group, this.player.group, this.player.auraMesh, this.sparkles.points, this.ghostMesh);
 
     this.rig = new ThirdPersonCamera(this.camera, this.renderer.domElement);
 
@@ -185,6 +196,8 @@ export class Game {
 
   private begin(): void {
     this.audio.unlock(); // browsers require a user click before audio can play
+    this.ghostRecorder.reset();
+    this.ghostClock = 0;
     if (this.state.transition('playing')) {
       this.hud.showTitle(false);
       this.hud.showHud(true);
@@ -212,6 +225,8 @@ export class Game {
     this.stats = { time: 0, falls: 0, continued: false };
     this.pulsesFired = 0;
     this.fallsSinceCheckpoint = 0;
+    this.ghostRecorder.reset();
+    this.ghostClock = 0;
     this.progress.clear();
     this.refreshContinue();
     this.moverTime = 0;
@@ -256,6 +271,14 @@ export class Game {
       const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
       const { bestTime, fewestFalls } = out.record;
       bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
+      if (out.record.bestTime === this.stats.time) {
+        const track = this.ghostRecorder.finish(this.player.body.pos);
+        if (track) {
+          this.ghostStore.save(track);
+          this.ghost = track;
+          bestLine += '  ·  Ghost saved';
+        }
+      }
       if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
       else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
     }
@@ -299,6 +322,7 @@ export class Game {
     this.sparkles.update(dt);
     this.env.update(target, this.elapsed);
     this.rig.update(dt, target, [...this.level.solids(this.reveal), ...this.level.moverSolids(this.reveal, this.moverTime)]);
+    this.updateGhost();
     this.hud.setPulse(this.lantern.charge, this.lantern.pulsing);
 
     this.renderer.render(this.scene, this.camera);
@@ -360,6 +384,8 @@ export class Game {
       [...this.level.solids(this.reveal), ...movers],
     );
     this.jumpQueued = false;
+    this.ghostClock += dt;
+    if (!this.stats.continued) this.ghostRecorder.update(dt, body.pos);
     if (ev.jumped) {
       this.audio.jump();
       this.player.kick(0.18); // stretch
@@ -391,6 +417,16 @@ export class Game {
     CHECKPOINTS.forEach((c, i) => this.tryCheckpoint(c, i, feetNow));
     if (inTrigger(feetNow, GOAL)) this.win();
     else if (body.pos.y < KILL_Y) this.respawn(true);
+  }
+
+  /** Show the best-run ghost only during full runs, and only if the player has not turned it off. */
+  private updateGhost(): void {
+    const show = this.state.phase === 'playing' && this.ghost !== null && !this.stats.continued && this.settings.get().showGhost;
+    this.ghostMesh.visible = show;
+    if (show && this.ghost) {
+      const g = sampleGhost(this.ghost, this.ghostClock);
+      this.ghostMesh.position.set(g.x, g.y, g.z);
+    }
   }
 
   private noteStanding(id: string | null, dt: number): void {
@@ -472,6 +508,8 @@ export class Game {
     this.player.dispose();
     this.level.dispose();
     this.env.dispose();
+    this.ghostMesh.geometry.dispose();
+    (this.ghostMesh.material as THREE.Material).dispose();
     this.events.clear();
     this.renderer.dispose();
     this.renderer.domElement.remove();
