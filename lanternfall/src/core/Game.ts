@@ -17,6 +17,7 @@ import {
 import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
+import { HintEngine } from './Hints';
 import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
 import { SettingsStore } from './Settings';
@@ -60,6 +61,7 @@ export class Game {
   private readonly resizeObserver: ResizeObserver;
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
+  private readonly hints = new HintEngine(browserStore());
   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
   private unsubscribeSettings: () => void = () => {};
   private readonly touch: TouchControls | null;
@@ -78,6 +80,11 @@ export class Game {
   private readonly beaconsActive = new Set<string>();
   private readonly fallLog = new FallLog();
   private lastPlatform: string | null = null;
+  /** For tips: what the player stands on now, for how long, and how often they struggled. */
+  private standingOn: string | null = null;
+  private standingFor = 0;
+  private pulsesFired = 0;
+  private fallsSinceCheckpoint = 0;
   private stepTimer = 0;
   private disposed = false;
 
@@ -157,6 +164,8 @@ export class Game {
     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
     this.applyCheckpointObjective(c.id);
     this.stats = { time: 0, falls: 0, continued: true };
+    this.pulsesFired = 0;
+    this.fallsSinceCheckpoint = 0;
     this.placePlayer();
     this.begin();
   }
@@ -198,6 +207,8 @@ export class Game {
     this.hud.setObjective(OBJ_START);
     this.hud.setCheckpoint('start');
     this.stats = { time: 0, falls: 0, continued: false };
+    this.pulsesFired = 0;
+    this.fallsSinceCheckpoint = 0;
     this.progress.clear();
     this.refreshContinue();
     this.moverTime = 0;
@@ -220,6 +231,7 @@ export class Game {
   private respawn(fell: boolean): void {
     if (fell) {
       this.stats.falls++;
+      this.fallsSinceCheckpoint++;
       this.fallLog.record(this.lastPlatform);
     }
     this.placePlayer();
@@ -307,6 +319,7 @@ export class Game {
       this.pulseQueued = false;
       const lp = this.player.lanternPos;
       if (this.lantern.tryPulse()) {
+        this.pulsesFired++;
         this.audio.pulse();
         this.sparkles.ring(lp.x, lp.y, lp.z, 60, GOLD, 9);
         for (const b of BEACONS) if (!this.beaconsActive.has(b.id) && pulseReaches(b, lp)) this.activateBeacon(b);
@@ -357,13 +370,18 @@ export class Game {
     // Remember the last platform we stood on (for the "toughest jump" stat) and play footsteps.
     if (body.grounded) {
       const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
-      this.lastPlatform = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime) ?? this.lastPlatform;
+      const under = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime);
+      this.lastPlatform = under ?? this.lastPlatform;
+      this.noteStanding(under, dt);
       this.stepTimer -= dt;
       if (this.stepTimer <= 0 && Math.hypot(body.vel.x, body.vel.z) > 2) {
         this.audio.step();
         this.stepTimer = 0.3;
       }
+    } else {
+      this.noteStanding(null, dt);
     }
+    this.showHint(dt);
 
     // 4. Checkpoints, goal, falling
     const feetNow = { x: body.pos.x, y: body.feetY, z: body.pos.z };
@@ -372,9 +390,28 @@ export class Game {
     else if (body.pos.y < KILL_Y) this.respawn(true);
   }
 
+  private noteStanding(id: string | null, dt: number): void {
+    if (id === this.standingOn) this.standingFor += dt;
+    else {
+      this.standingOn = id;
+      this.standingFor = 0;
+    }
+  }
+
+  private showHint(dt: number): void {
+    const hint = this.hints.update(dt, {
+      platformId: this.standingOn,
+      pulsesFired: this.pulsesFired,
+      fallsSinceCheckpoint: this.fallsSinceCheckpoint,
+      secondsOnPlatform: this.standingFor,
+    });
+    if (hint) this.hud.toast(hint.text, 6);
+  }
+
   private tryCheckpoint(c: TriggerDef, index: number, feet: { x: number; y: number; z: number }): void {
     if (this.activeCheckpoint === c.id || !inTrigger(feet, c)) return;
     this.activeCheckpoint = c.id;
+    this.fallsSinceCheckpoint = 0;
     this.respawnPoint = respawnPosition(c);
     this.level.setActiveCheckpoint(c.id);
     this.audio.checkpoint();
