@@ -20,6 +20,7 @@ import { FallLog } from './FallLog';
 import { AchievementBook } from './Achievements';
 import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
 import { HintEngine } from './Hints';
+import { LifetimeStats } from './LifetimeStats';
 import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
 import { Settings, SettingsStore } from './Settings';
@@ -65,6 +66,8 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private readonly hints = new HintEngine(browserStore());
+  private readonly lifetime = new LifetimeStats(browserStore());
+  private sinceAutosave = 0;
   private readonly achievements = new AchievementBook(browserStore());
   private readonly ghostStore = new GhostStore(browserStore());
   private readonly ghostRecorder = new GhostRecorder();
@@ -202,6 +205,7 @@ export class Game {
     this.ghostRecorder.reset();
     this.ghostClock = 0;
     if (this.state.transition('playing')) {
+      this.lifetime.add({ runsStarted: 1 });
       this.hud.showTitle(false);
       this.hud.showHud(true);
       this.hud.toast('Walk to the edge. Your lantern reveals hidden stones.', 4);
@@ -209,7 +213,11 @@ export class Game {
   }
 
   private togglePause(): void {
-    if (this.state.phase === 'playing' && this.state.transition('paused')) this.hud.showPause(true);
+    if (this.state.phase === 'playing' && this.state.transition('paused')) {
+      this.lifetime.save();
+      this.hud.setLifetime(this.lifetime.summary());
+      this.hud.showPause(true);
+    }
     else if (this.state.phase === 'paused' && this.state.transition('playing')) {
       this.hud.showPause(false);
       this.lastTime = -1; // avoid a big time jump after resuming
@@ -235,7 +243,10 @@ export class Game {
     this.moverTime = 0;
     this.fallLog.reset();
     this.placePlayer();
-    if (this.state.transition('playing')) this.hud.showWin(false);
+    if (this.state.transition('playing')) {
+      this.lifetime.add({ runsStarted: 1 });
+      this.hud.showWin(false);
+    }
   }
 
   private placePlayer(): void {
@@ -253,6 +264,7 @@ export class Game {
     if (fell) {
       this.stats.falls++;
       this.fallsSinceCheckpoint++;
+      this.lifetime.add({ falls: 1 });
       this.fallLog.record(this.lastPlatform);
     }
     this.placePlayer();
@@ -267,6 +279,8 @@ export class Game {
     const p = this.player.body.pos;
     this.sparkles.burst(p.x, p.y, p.z, 120, GOLD, 5, 4);
     const worst = this.fallLog.worst();
+    this.lifetime.add({ runsCompleted: 1 });
+    this.lifetime.save();
     this.progress.clear();
     this.refreshContinue();
     let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
@@ -319,6 +333,12 @@ export class Game {
         this.accumulator -= STEP;
       }
       this.stats.time += dt;
+      this.lifetime.add({ seconds: dt });
+      this.sinceAutosave += dt;
+      if (this.sinceAutosave >= 30) {
+        this.sinceAutosave = 0;
+        this.lifetime.save(); // so a closed tab loses at most half a minute
+      }
     } else if (this.state.phase === 'menu') {
       this.rig.rotate(0.12 * dt); // slow cinematic orbit behind the title screen
     }
@@ -355,6 +375,7 @@ export class Game {
       const lp = this.player.lanternPos;
       if (this.lantern.tryPulse()) {
         this.pulsesFired++;
+        this.lifetime.add({ pulses: 1 });
         this.audio.pulse();
         this.sparkles.ring(lp.x, lp.y, lp.z, 60, GOLD, 9);
         for (const b of BEACONS) if (!this.beaconsActive.has(b.id) && pulseReaches(b, lp)) this.activateBeacon(b);
@@ -504,6 +525,7 @@ export class Game {
 
   dispose(): void {
     this.disposed = true;
+    this.lifetime.save();
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
     this.rig.dispose();

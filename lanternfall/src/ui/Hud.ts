@@ -56,6 +56,7 @@ export class Hud {
       <div class="screen hidden" id="pause-screen">
         <div class="panel">
           <h2>Paused</h2>
+          <p id="lifetime" class="how"></p>
           <div class="settings">
             <label>Volume <input id="set-volume" type="range" min="${SETTING_LIMITS.volume.min}" max="${SETTING_LIMITS.volume.max}" step="0.05"></label>
             <label>Camera speed <input id="set-sens" type="range" min="${SETTING_LIMITS.sensitivity.min}" max="${SETTING_LIMITS.sensitivity.max}" step="0.1"></label>
@@ -122,6 +123,11 @@ export class Hud {
   }
 
   showTitle(on: boolean): void { this.show('#title-screen', on); }
+
+  /** Totals line on the pause screen (empty string hides it). */
+  setLifetime(text: string): void {
+    this.q('#lifetime').textContent = text;
+  }
 
   /** Small line on the title screen such as "Achievements 2 of 7". Hidden when nothing is earned yet. */
   setAchievementProgress(earned: number, total: number): void {

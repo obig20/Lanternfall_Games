@@ -34,11 +34,15 @@ Note: a blind leap can still work, because the platform appears as you get close
 Some bridge stones are *locked*: the lantern cannot reveal them. Walk to the crystal on the side ledge and pulse (Q)
 within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept across respawns).
 
-## Progress, hints and splits
+## Progress, hints, splits, ghost and more
 - **Continue:** the title screen offers to resume from your furthest checkpoint (src/core/Progress.ts). A continued run skips the start of the tower, so it never saves a best-time record. Starting fresh or finishing clears the save.
 - **Hints:** one-time tips teach the pulse, the crystal, the drifting stones and the lift, and a "stuck" tip appears after three falls at one checkpoint (src/core/Hints.ts). Each tip shows once and is remembered between sessions.
 - **Splits:** the best time to reach each checkpoint is saved, and the checkpoint message shows how far ahead or behind that pace you are (src/core/Splits.ts).
-- All three save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
+- **Ghost:** your best full run is recorded (10 samples a second, whole centimetres) and replayed as a translucent runner (src/core/Ghost.ts). It snaps across respawns, and is never recorded or shown for continued runs.
+- **Achievements:** seven, shown on the win screen (src/core/Achievements.ts). The time targets (120 s and 75 s) are design guesses, not measured data. Retune them after timing real players.
+- **Lifetime stats:** play time, falls and runs finished, shown on the pause screen (src/core/LifetimeStats.ts). Saved when you pause, finish, or every 30 seconds.
+- **Settings:** tips on/off, ghost on/off and reduced screen flashing, next to volume, camera speed and invert-Y.
+- All of these save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
 
 ## Moving platforms (Room 3)
 Platforms M1, M2 and the lift V1 slide along fixed paths (src/world/MovingPlatform.ts). Their position is a pure function of time, with easing and a pause at each end.
@@ -63,7 +67,7 @@ Platforms are axis-aligned boxes, so a small custom collision system (PlayerBody
 fully unit-tested. Moving platforms use the same boxes, updated each physics step. Rapier can be added later if rotating or sloped geometry is needed.
 
 ## Status
-`npm run lint`, `npm run build` and `npm test` pass (193 tests). Tests cover the logic: physics, the lantern rule, beacons,
+`npm run lint`, `npm run build` and `npm test` pass (241 tests). Tests cover the logic: physics, the lantern rule, beacons,
 moving platforms, camera ray clipping, settings, records, gamepad mapping and level layout.
 Rendering, HUD, audio, touch controls and the feel of the game are **not** covered by automated tests and need playtesting.
 
