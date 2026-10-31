@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Synth } from '../audio/Synth';
 import { Sparkles } from '../fx/Sparkles';
 import { Input } from '../input/Input';
+import { ACTION_LABELS, BindingStore, keyLabel } from '../input/Keybinds';
 import { TouchControls } from '../input/TouchControls';
 import { CharacterModel } from '../player/CharacterModel';
 import { Player } from '../player/Player';
@@ -66,6 +67,7 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private readonly hints = new HintEngine(browserStore());
+  private readonly keybinds = new BindingStore(browserStore());
   private readonly lifetime = new LifetimeStats(browserStore());
   private sinceAutosave = 0;
   private readonly achievements = new AchievementBook(browserStore());
@@ -127,6 +129,23 @@ export class Game {
     this.hud.onResume = () => this.togglePause();
     this.hud.onRestart = () => this.restart();
     this.hud.onSettings = (patch) => this.settings.set(patch);
+    this.input.bindings = this.keybinds.get();
+    this.hud.setBindings(this.keybinds.get());
+    this.hud.onRebind = (action, code) => {
+      const result = this.keybinds.rebind(action, code);
+      if (!result) {
+        this.hud.setBindings(this.keybinds.get(), 'That key cannot be used.');
+        return;
+      }
+      const swap = result.swapped ? `${ACTION_LABELS[result.swapped]} now uses ${keyLabel(result.bindings[result.swapped])}.` : '';
+      this.input.bindings = result.bindings;
+      this.hud.setBindings(result.bindings, swap);
+    };
+    this.hud.onResetKeys = () => {
+      this.keybinds.reset();
+      this.input.bindings = this.keybinds.get();
+      this.hud.setBindings(this.keybinds.get(), 'Keys reset.');
+    };
     this.unsubscribeSettings = this.settings.onChange((v) => this.applySettings(v));
     this.applySettings(this.settings.get());
     this.hud.setSettings(this.settings.get());
@@ -319,10 +338,10 @@ export class Game {
     this.touch?.setVisible(this.state.phase === 'playing');
 
     if (this.state.phase === 'playing') {
-      if (this.input.down('ArrowLeft')) this.rig.rotate(-1.8 * dt);
-      if (this.input.down('ArrowRight')) this.rig.rotate(1.8 * dt);
-      if (this.input.pressed('Space')) this.jumpQueued = true;
-      if (this.input.pressed('KeyQ') || this.touch?.consumePulse()) this.pulseQueued = true;
+      if (this.input.actionDown('turnLeft')) this.rig.rotate(-1.8 * dt);
+      if (this.input.actionDown('turnRight')) this.rig.rotate(1.8 * dt);
+      if (this.input.actionPressed('jump')) this.jumpQueued = true;
+      if (this.input.actionPressed('pulse') || this.touch?.consumePulse()) this.pulseQueued = true;
       if (this.touch?.consumeJump()) this.jumpQueued = true;
       const pad = this.input.pad;
       if (pad.lookX !== 0 || pad.lookY !== 0) this.rig.look(pad.lookX * 500 * dt, pad.lookY * 350 * dt);
@@ -358,9 +377,9 @@ export class Game {
   };
 
   private handleKeys(): void {
-    if (this.input.pressed('Escape') || this.input.pressed('KeyP')) this.togglePause();
-    if (this.input.pressed('KeyM')) this.hud.toast(this.audio.toggleMute() ? 'Sound off' : 'Sound on', 1.2);
-    if (this.input.pressed('KeyR') && this.state.phase === 'playing') this.respawn(false);
+    if (this.input.actionPressed('pause')) this.togglePause();
+    if (this.input.actionPressed('mute')) this.hud.toast(this.audio.toggleMute() ? 'Sound off' : 'Sound on', 1.2);
+    if (this.input.actionPressed('restart') && this.state.phase === 'playing') this.respawn(false);
   }
 
   /** One fixed physics/gameplay step. */
@@ -403,8 +422,8 @@ export class Game {
     const pad = this.input.pad;
     const tx = this.touch?.moveX ?? 0;
     const tz = this.touch?.moveZ ?? 0;
-    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
-    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
+    const ix = (this.input.actionDown('right') ? 1 : 0) - (this.input.actionDown('left') ? 1 : 0) + pad.moveX + tx;
+    const iz = (this.input.actionDown('forward') ? 1 : 0) - (this.input.actionDown('back') ? 1 : 0) + pad.moveZ + tz;
     // Moving platforms: carry the rider, push the player out of anything that slid into them.
     const movers = applyMovers(body, MOVERS, clockBefore, this.moverTime, (id) => this.reveal.isSolid(id) || !this.level.isHiddenMover(id));
     const ev = body.step(

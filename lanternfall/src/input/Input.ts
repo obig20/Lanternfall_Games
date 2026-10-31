@@ -1,6 +1,8 @@
 import { NEUTRAL_PAD, PadEdges, PadState, readPad } from './GamepadMap';
+import { Action, Bindings, DEFAULT_BINDINGS } from './Keybinds';
 
-const PAD_KEYS = { jump: 'Space', pulse: 'KeyQ', restart: 'KeyR', pause: 'Escape' } as const;
+/** Which action each gamepad button triggers. The pad is not rebindable, but it follows the keyboard layout. */
+const PAD_ACTIONS = { jump: 'jump', pulse: 'pulse', restart: 'restart', pause: 'pause' } as const;
 
 /** Keyboard and gamepad state. `down` = held; `pressed` = went down this frame. */
 export class Input {
@@ -9,6 +11,8 @@ export class Input {
   /** Latest gamepad reading (neutral when no pad is connected). */
   pad: PadState = { ...NEUTRAL_PAD };
   private readonly padEdges = new PadEdges();
+  /** The player's keyboard layout. Set by the game; defaults to WASD. */
+  bindings: Bindings = DEFAULT_BINDINGS;
   private static readonly BLOCKED = new Set(['Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 
   constructor() {
@@ -25,16 +29,26 @@ export class Input {
     return this.justDown.has(code);
   }
 
+  /** Is the key bound to this action held right now? */
+  actionDown(action: Action): boolean {
+    return this.held.has(this.bindings[action]);
+  }
+
+  /** Did the key bound to this action go down this frame? Escape always counts as pause. */
+  actionPressed(action: Action): boolean {
+    return this.justDown.has(this.bindings[action]) || (action === 'pause' && this.justDown.has('Escape'));
+  }
+
   /**
    * Read the first connected gamepad. Call once per frame before reading input.
    * Pad buttons are turned into the same key codes the keyboard uses, so game code
-   * only has to ask `pressed('Space')` once.
+   * only has to ask `actionPressed('jump')` once.
    */
   pollPad(): void {
     const list = typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function' ? navigator.getGamepads() : [];
     const connected = Array.from(list).find((p) => p && p.connected) ?? null;
     this.pad = readPad(connected);
-    for (const button of this.padEdges.update(this.pad)) this.justDown.add(PAD_KEYS[button]);
+    for (const button of this.padEdges.update(this.pad)) this.justDown.add(this.bindings[PAD_ACTIONS[button]]);
   }
 
   /** Call once at the end of every frame. */

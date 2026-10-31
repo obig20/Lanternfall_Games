@@ -1,4 +1,5 @@
 import { SETTING_LIMITS, Settings } from '../core/Settings';
+import { ACTIONS, ACTION_LABELS, Action, Bindings, DEFAULT_BINDINGS, keyLabel } from '../input/Keybinds';
 
 const SETTING_INPUTS = ['#set-volume', '#set-sens', '#set-invert', '#set-hints', '#set-ghost', '#set-flash'];
 
@@ -9,12 +10,17 @@ export class Hud {
   onResume: () => void = () => {};
   onRestart: () => void = () => {};
   onSettings: (patch: Partial<Settings>) => void = () => {};
+  /** Called when the player picks a new key for an action. */
+  onRebind: (action: Action, code: string) => void = () => {};
+  onResetKeys: () => void = () => {};
   /** When true the respawn flash is skipped (accessibility). */
   reduceFlash = false;
 
   private readonly root = document.createElement('div');
   private readonly q = <T extends HTMLElement>(sel: string): T => this.root.querySelector(sel) as T;
   private toastTimer = 0;
+  private listening: Action | null = null;
+  private bindings: Bindings = DEFAULT_BINDINGS;
   private flashTimer = 0;
 
   constructor(parent: HTMLElement) {
@@ -33,7 +39,7 @@ export class Hud {
             <li><b>Touch</b> on-screen stick and buttons</li>
             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
           </ul>
-          <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
+          <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.<br>Keys can be changed in the pause menu.</p>
           <p id="title-achievements" class="how"></p>
           <button id="btn-continue" class="hidden">Continue</button>
           <button id="btn-start">Begin</button>
@@ -65,6 +71,9 @@ export class Hud {
             <label class="check"><input id="set-ghost" type="checkbox"> Show ghost of best run</label>
             <label class="check"><input id="set-flash" type="checkbox"> Reduce screen flashing</label>
           </div>
+          <div class="keys" id="key-list"></div>
+          <p class="keynote" id="key-note"></p>
+          <button id="btn-reset-keys">Reset keys</button>
           <button id="btn-resume">Resume</button>
         </div>
       </div>
@@ -88,6 +97,9 @@ export class Hud {
     this.q('#btn-continue').addEventListener('click', this.continueRun);
     this.q('#btn-resume').addEventListener('click', this.resume);
     this.q('#btn-restart').addEventListener('click', this.restart);
+    this.q('#btn-reset-keys').addEventListener('click', this.resetKeys);
+    this.q('#key-list').addEventListener('click', this.keyClick);
+    this.renderKeys();
     for (const id of SETTING_INPUTS) this.q(id).addEventListener('input', this.settingsInput);
   }
 
@@ -111,6 +123,53 @@ export class Hud {
     this.q<HTMLInputElement>('#set-ghost').checked = s.showGhost;
     this.q<HTMLInputElement>('#set-flash').checked = s.reduceFlash;
     this.reduceFlash = s.reduceFlash;
+  }
+
+  private resetKeys = (): void => {
+    this.stopListening();
+    this.onResetKeys();
+  };
+
+  private keyClick = (e: Event): void => {
+    const button = (e.target as HTMLElement).closest('button[data-action]') as HTMLElement | null;
+    if (!button) return;
+    this.stopListening();
+    this.listening = button.dataset.action as Action;
+    button.textContent = 'press a key…';
+    button.classList.add('listening');
+    this.q('#key-note').textContent = 'Esc cancels';
+    window.addEventListener('keydown', this.onCapture, true);
+  };
+
+  /** While waiting for a key, swallow it so it never reaches the game. Escape cancels. */
+  private onCapture = (e: KeyboardEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    const action = this.listening;
+    this.stopListening();
+    if (action && e.code !== 'Escape') this.onRebind(action, e.code);
+  };
+
+  private stopListening(): void {
+    if (this.listening === null) return;
+    this.listening = null;
+    window.removeEventListener('keydown', this.onCapture, true);
+    this.q('#key-note').textContent = '';
+    this.renderKeys();
+  }
+
+  /** Show the current layout in the pause menu. `note` explains a swap, e.g. "Pulse now uses Space". */
+  setBindings(b: Bindings, note = ''): void {
+    this.bindings = b;
+    this.renderKeys();
+    this.q('#key-note').textContent = note;
+  }
+
+  private renderKeys(): void {
+    const rows = ACTIONS.map(
+      (a) => `<div class="keyrow"><span>${ACTION_LABELS[a]}</span><button data-action="${a}">${keyLabel(this.bindings[a])}</button></div>`,
+    );
+    this.q('#key-list').innerHTML = rows.join('');
   }
 
   private start = (): void => this.onStart();
@@ -140,7 +199,10 @@ export class Hud {
     if (label !== null) this.q('#btn-continue').textContent = label;
   }
   showHud(on: boolean): void { this.show('#hud', on); }
-  showPause(on: boolean): void { this.show('#pause-screen', on); }
+  showPause(on: boolean): void {
+    if (!on) this.stopListening();
+    this.show('#pause-screen', on);
+  }
 
   /** `bestLine` is a second line such as "New best time!" or "Best 1:20.4 · fewest falls 2". */
   showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = '', unlocked: readonly string[] = []): void {
@@ -193,6 +255,9 @@ export class Hud {
     this.q('#btn-continue').removeEventListener('click', this.continueRun);
     this.q('#btn-resume').removeEventListener('click', this.resume);
     this.q('#btn-restart').removeEventListener('click', this.restart);
+    this.q('#btn-reset-keys').removeEventListener('click', this.resetKeys);
+    this.q('#key-list').removeEventListener('click', this.keyClick);
+    window.removeEventListener('keydown', this.onCapture, true);
     for (const id of SETTING_INPUTS) this.q(id).removeEventListener('input', this.settingsInput);
     this.root.remove();
   }

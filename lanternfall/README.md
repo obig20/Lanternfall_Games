@@ -42,6 +42,7 @@ within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept 
 - **Achievements:** seven, shown on the win screen (src/core/Achievements.ts). The time targets (120 s and 75 s) are design guesses, not measured data. Retune them after timing real players.
 - **Lifetime stats:** play time, falls and runs finished, shown on the pause screen (src/core/LifetimeStats.ts). Saved when you pause, finish, or every 30 seconds.
 - **Settings:** tips on/off, ghost on/off and reduced screen flashing, next to volume, camera speed and invert-Y.
+- **Rebindable keys:** every keyboard action can be changed in the pause menu (src/input/Keybinds.ts). Picking a key that is already used swaps the two actions, Escape always pauses and can never be bound, and a clash in saved data resets the layout. The gamepad follows the same layout for jump, pulse, restart and pause.
 - All of these save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
 
 ## Moving platforms (Room 3)
@@ -60,14 +61,14 @@ For Room 3 there is also a bot (tests/helpers/room3Sim.ts) that tries every star
 - src/player: Player (character + lantern), ThirdPersonCamera (follow camera with wall collision)
 - src/input: Input (keyboard + gamepad polling), GamepadMap, analog (deadzones), TouchControls
 - src/audio: Synth (all sounds generated live, no audio files) - src/fx: Sparkles - src/ui: Hud
-- tests: unit tests for the logic above, including bots that complete the route and sweep Room 3's timing
+- tests: unit tests for the logic above, plus jsdom tests for the menu screens, including bots that complete the route and sweep Room 3's timing
 
 ## Design decision: no Rapier yet
 Platforms are axis-aligned boxes, so a small custom collision system (PlayerBody) is simpler, deterministic and
 fully unit-tested. Moving platforms use the same boxes, updated each physics step. Rapier can be added later if rotating or sloped geometry is needed.
 
 ## Status
-`npm run lint`, `npm run build` and `npm test` pass (241 tests). Tests cover the logic: physics, the lantern rule, beacons,
+`npm run lint`, `npm run build` and `npm test` pass (278 tests). Tests cover the logic: physics, the lantern rule, beacons,
 moving platforms, camera ray clipping, settings, records, gamepad mapping and level layout.
 Rendering, HUD, audio, touch controls and the feel of the game are **not** covered by automated tests and need playtesting.
 

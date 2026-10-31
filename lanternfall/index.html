@@ -43,6 +43,11 @@
       .settings label { display: flex; align-items: center; justify-content: space-between; gap: 16px; pointer-events: auto; }
       .settings input[type=range] { width: 180px; accent-color: #ffd36b; }
       .settings .check { justify-content: flex-start; gap: 8px; }
+      .keys { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; text-align: left; font-size: 14px; max-height: 34vh; overflow-y: auto; padding-right: 6px; }
+      .keyrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+      .keyrow button { margin: 0; padding: 4px 14px; min-width: 96px; font-size: 13px; letter-spacing: 0; pointer-events: auto; }
+      .keyrow button.listening { background: #fff; outline: 2px solid #ffd36b; }
+      .keynote { min-height: 1.3em; font-size: 12px; color: #ffd36b; }
       .best { margin: 4px 0 0; color: #ffd36b; font-size: 14px; min-height: 1.2em; }
       .touch-controls { position: absolute; inset: 0; pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
       .touch-controls.hidden { display: none; }
