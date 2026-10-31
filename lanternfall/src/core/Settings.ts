@@ -6,15 +6,32 @@ export interface Settings {
   /** Camera turn speed multiplier. */
   sensitivity: number;
   invertY: boolean;
+  /** Show one-time tips (see Hints.ts). */
+  showHints: boolean;
+  /** Show the translucent ghost of your best run. */
+  showGhost: boolean;
+  /** Skip the dark flash when you fall and respawn. */
+  reduceFlash: boolean;
 }
 
-export const DEFAULT_SETTINGS: Readonly<Settings> = { volume: 0.5, sensitivity: 1, invertY: false };
+export const DEFAULT_SETTINGS: Readonly<Settings> = {
+  volume: 0.5,
+  sensitivity: 1,
+  invertY: false,
+  showHints: true,
+  showGhost: true,
+  reduceFlash: false,
+};
 export const SETTING_LIMITS = {
   volume: { min: 0, max: 1 },
   sensitivity: { min: 0.3, max: 2.5 },
 } as const;
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+function bool(raw: unknown, fallback: boolean): boolean {
+  return typeof raw === 'boolean' ? raw : fallback;
+}
 
 function num(raw: unknown, fallback: number, lo: number, hi: number): number {
   return typeof raw === 'number' && Number.isFinite(raw) ? clamp(raw, lo, hi) : fallback;
@@ -26,7 +43,10 @@ export function sanitizeSettings(raw: unknown): Settings {
   return {
     volume: num(r.volume, DEFAULT_SETTINGS.volume, SETTING_LIMITS.volume.min, SETTING_LIMITS.volume.max),
     sensitivity: num(r.sensitivity, DEFAULT_SETTINGS.sensitivity, SETTING_LIMITS.sensitivity.min, SETTING_LIMITS.sensitivity.max),
-    invertY: typeof r.invertY === 'boolean' ? r.invertY : DEFAULT_SETTINGS.invertY,
+    invertY: bool(r.invertY, DEFAULT_SETTINGS.invertY),
+    showHints: bool(r.showHints, DEFAULT_SETTINGS.showHints),
+    showGhost: bool(r.showGhost, DEFAULT_SETTINGS.showGhost),
+    reduceFlash: bool(r.reduceFlash, DEFAULT_SETTINGS.reduceFlash),
   };
 }
 

@@ -23,8 +23,25 @@ describe('sanitizeSettings', () => {
 
   it('keeps valid fields even when others are bad', () => {
     expect(sanitizeSettings({ volume: 0.2, invertY: true, sensitivity: 'fast' })).toEqual({
-      volume: 0.2, sensitivity: DEFAULT_SETTINGS.sensitivity, invertY: true,
+      ...DEFAULT_SETTINGS, volume: 0.2, sensitivity: DEFAULT_SETTINGS.sensitivity, invertY: true,
     });
+  });
+
+  it('defaults the accessibility options sensibly: tips and ghost on, flashing on', () => {
+    expect(DEFAULT_SETTINGS.showHints).toBe(true);
+    expect(DEFAULT_SETTINGS.showGhost).toBe(true);
+    expect(DEFAULT_SETTINGS.reduceFlash).toBe(false);
+  });
+
+  it('accepts the new boolean options and rejects non-booleans', () => {
+    const s = sanitizeSettings({ showHints: false, showGhost: false, reduceFlash: true });
+    expect(s.showHints).toBe(false);
+    expect(s.showGhost).toBe(false);
+    expect(s.reduceFlash).toBe(true);
+    const bad = sanitizeSettings({ showHints: 'no', showGhost: 0, reduceFlash: null });
+    expect(bad.showHints).toBe(true);
+    expect(bad.showGhost).toBe(true);
+    expect(bad.reduceFlash).toBe(false);
   });
 });
 
@@ -64,6 +81,25 @@ describe('SettingsStore', () => {
     off();
     s.set({ volume: 0.2 });
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('old saves without the new options load with their defaults', () => {
+    const mem = new MemoryStore();
+    mem.setItem('lanternfall.settings', JSON.stringify({ volume: 0.3, sensitivity: 1.5, invertY: true }));
+    const s = new SettingsStore(mem).get();
+    expect(s.volume).toBe(0.3);
+    expect(s.invertY).toBe(true);
+    expect(s.showHints).toBe(true);
+    expect(s.reduceFlash).toBe(false);
+  });
+
+  it('saves the new options', () => {
+    const mem = new MemoryStore();
+    new SettingsStore(mem).set({ reduceFlash: true, showGhost: false });
+    const again = new SettingsStore(mem).get();
+    expect(again.reduceFlash).toBe(true);
+    expect(again.showGhost).toBe(false);
+    expect(again.showHints).toBe(true);
   });
 
   it('reset restores defaults', () => {

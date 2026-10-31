@@ -20,7 +20,7 @@ import { FallLog } from './FallLog';
 import { HintEngine } from './Hints';
 import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
-import { SettingsStore } from './Settings';
+import { Settings, SettingsStore } from './Settings';
 import { SplitBook, formatDelta } from './Splits';
 import { browserStore } from './storage';
 import { GameState } from './GameState';
@@ -123,10 +123,11 @@ export class Game {
     void this.loadCharacter();
   }
 
-  private applySettings(v: Readonly<{ volume: number; sensitivity: number; invertY: boolean }>): void {
+  private applySettings(v: Readonly<Settings>): void {
     this.audio.setVolume(v.volume);
     this.rig.sensitivity = v.sensitivity;
     this.rig.invertY = v.invertY;
+    this.hud.reduceFlash = v.reduceFlash;
   }
 
   /** Load the FBX character in the background; the built-in character is used until (or unless) it loads. */
@@ -401,6 +402,8 @@ export class Game {
   }
 
   private showHint(dt: number): void {
+    // Tips switched off: do not even ask, or the engine would mark them as seen and they would be lost.
+    if (!this.settings.get().showHints) return;
     const hint = this.hints.update(dt, {
       platformId: this.standingOn,
       pulsesFired: this.pulsesFired,

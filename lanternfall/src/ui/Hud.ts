@@ -1,5 +1,7 @@
 import { SETTING_LIMITS, Settings } from '../core/Settings';
 
+const SETTING_INPUTS = ['#set-volume', '#set-sens', '#set-invert', '#set-hints', '#set-ghost', '#set-flash'];
+
 /** All on-screen text and buttons. Plain DOM (no framework) so it is easy to read and change. */
 export class Hud {
   onStart: () => void = () => {};
@@ -7,6 +9,8 @@ export class Hud {
   onResume: () => void = () => {};
   onRestart: () => void = () => {};
   onSettings: (patch: Partial<Settings>) => void = () => {};
+  /** When true the respawn flash is skipped (accessibility). */
+  reduceFlash = false;
 
   private readonly root = document.createElement('div');
   private readonly q = <T extends HTMLElement>(sel: string): T => this.root.querySelector(sel) as T;
@@ -55,6 +59,9 @@ export class Hud {
             <label>Volume <input id="set-volume" type="range" min="${SETTING_LIMITS.volume.min}" max="${SETTING_LIMITS.volume.max}" step="0.05"></label>
             <label>Camera speed <input id="set-sens" type="range" min="${SETTING_LIMITS.sensitivity.min}" max="${SETTING_LIMITS.sensitivity.max}" step="0.1"></label>
             <label class="check"><input id="set-invert" type="checkbox"> Invert camera Y</label>
+            <label class="check"><input id="set-hints" type="checkbox"> Show tips</label>
+            <label class="check"><input id="set-ghost" type="checkbox"> Show ghost of best run</label>
+            <label class="check"><input id="set-flash" type="checkbox"> Reduce screen flashing</label>
           </div>
           <button id="btn-resume">Resume</button>
         </div>
@@ -78,7 +85,7 @@ export class Hud {
     this.q('#btn-continue').addEventListener('click', this.continueRun);
     this.q('#btn-resume').addEventListener('click', this.resume);
     this.q('#btn-restart').addEventListener('click', this.restart);
-    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).addEventListener('input', this.settingsInput);
+    for (const id of SETTING_INPUTS) this.q(id).addEventListener('input', this.settingsInput);
   }
 
   private settingsInput = (): void => {
@@ -86,6 +93,9 @@ export class Hud {
       volume: Number(this.q<HTMLInputElement>('#set-volume').value),
       sensitivity: Number(this.q<HTMLInputElement>('#set-sens').value),
       invertY: this.q<HTMLInputElement>('#set-invert').checked,
+      showHints: this.q<HTMLInputElement>('#set-hints').checked,
+      showGhost: this.q<HTMLInputElement>('#set-ghost').checked,
+      reduceFlash: this.q<HTMLInputElement>('#set-flash').checked,
     });
   };
 
@@ -94,6 +104,10 @@ export class Hud {
     this.q<HTMLInputElement>('#set-volume').value = String(s.volume);
     this.q<HTMLInputElement>('#set-sens').value = String(s.sensitivity);
     this.q<HTMLInputElement>('#set-invert').checked = s.invertY;
+    this.q<HTMLInputElement>('#set-hints').checked = s.showHints;
+    this.q<HTMLInputElement>('#set-ghost').checked = s.showGhost;
+    this.q<HTMLInputElement>('#set-flash').checked = s.reduceFlash;
+    this.reduceFlash = s.reduceFlash;
   }
 
   private start = (): void => this.onStart();
@@ -151,6 +165,7 @@ export class Hud {
 
   /** Brief dark flash when you fall and respawn. */
   flash(): void {
+    if (this.reduceFlash) return;
     const el = this.q<HTMLElement>('#flash');
     el.classList.add('on');
     window.clearTimeout(this.flashTimer);
@@ -164,7 +179,7 @@ export class Hud {
     this.q('#btn-continue').removeEventListener('click', this.continueRun);
     this.q('#btn-resume').removeEventListener('click', this.resume);
     this.q('#btn-restart').removeEventListener('click', this.restart);
-    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).removeEventListener('input', this.settingsInput);
+    for (const id of SETTING_INPUTS) this.q(id).removeEventListener('input', this.settingsInput);
     this.root.remove();
   }
 }
