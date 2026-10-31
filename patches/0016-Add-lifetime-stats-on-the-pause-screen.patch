@@ -1,0 +1,364 @@
+From 9be8e551e7a104366329e2e2e38c26dafbcb2594 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 11:04:55 +0000
+Subject: [PATCH 16/18] Add lifetime stats on the pause screen
+
+Totals live in memory and are saved when pausing, finishing, every 30
+seconds of play, and on dispose, so storage is not written every frame.
+Also updates the README for ghost, achievements, lifetime stats and the
+new settings.
+---
+ lanternfall/README.md                   | 10 ++-
+ lanternfall/src/core/Game.ts            | 26 ++++++-
+ lanternfall/src/core/LifetimeStats.ts   | 79 ++++++++++++++++++++
+ lanternfall/src/ui/Hud.ts               |  6 ++
+ lanternfall/tests/LifetimeStats.test.ts | 96 +++++++++++++++++++++++++
+ 5 files changed, 212 insertions(+), 5 deletions(-)
+ create mode 100644 lanternfall/src/core/LifetimeStats.ts
+ create mode 100644 lanternfall/tests/LifetimeStats.test.ts
+
+diff --git a/lanternfall/README.md b/lanternfall/README.md
+index 6f59650..7b623e6 100644
+--- a/lanternfall/README.md
++++ b/lanternfall/README.md
+@@ -34,11 +34,15 @@ Note: a blind leap can still work, because the platform appears as you get close
+ Some bridge stones are *locked*: the lantern cannot reveal them. Walk to the crystal on the side ledge and pulse (Q)
+ within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept across respawns).
+ 
+-## Progress, hints and splits
++## Progress, hints, splits, ghost and more
+ - **Continue:** the title screen offers to resume from your furthest checkpoint (src/core/Progress.ts). A continued run skips the start of the tower, so it never saves a best-time record. Starting fresh or finishing clears the save.
+ - **Hints:** one-time tips teach the pulse, the crystal, the drifting stones and the lift, and a "stuck" tip appears after three falls at one checkpoint (src/core/Hints.ts). Each tip shows once and is remembered between sessions.
+ - **Splits:** the best time to reach each checkpoint is saved, and the checkpoint message shows how far ahead or behind that pace you are (src/core/Splits.ts).
+-- All three save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
++- **Ghost:** your best full run is recorded (10 samples a second, whole centimetres) and replayed as a translucent runner (src/core/Ghost.ts). It snaps across respawns, and is never recorded or shown for continued runs.
++- **Achievements:** seven, shown on the win screen (src/core/Achievements.ts). The time targets (120 s and 75 s) are design guesses, not measured data. Retune them after timing real players.
++- **Lifetime stats:** play time, falls and runs finished, shown on the pause screen (src/core/LifetimeStats.ts). Saved when you pause, finish, or every 30 seconds.
++- **Settings:** tips on/off, ghost on/off and reduced screen flashing, next to volume, camera speed and invert-Y.
++- All of these save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
+ 
+ ## Moving platforms (Room 3)
+ Platforms M1, M2 and the lift V1 slide along fixed paths (src/world/MovingPlatform.ts). Their position is a pure function of time, with easing and a pause at each end.
+@@ -63,7 +67,7 @@ Platforms are axis-aligned boxes, so a small custom collision system (PlayerBody
+ fully unit-tested. Moving platforms use the same boxes, updated each physics step. Rapier can be added later if rotating or sloped geometry is needed.
+ 
+ ## Status
+-`npm run lint`, `npm run build` and `npm test` pass (193 tests). Tests cover the logic: physics, the lantern rule, beacons,
++`npm run lint`, `npm run build` and `npm test` pass (241 tests). Tests cover the logic: physics, the lantern rule, beacons,
+ moving platforms, camera ray clipping, settings, records, gamepad mapping and level layout.
+ Rendering, HUD, audio, touch controls and the feel of the game are **not** covered by automated tests and need playtesting.
+ 
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index bb6561b..73606c7 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -20,6 +20,7 @@ import { FallLog } from './FallLog';
+ import { AchievementBook } from './Achievements';
+ import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
+ import { HintEngine } from './Hints';
++import { LifetimeStats } from './LifetimeStats';
+ import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+ import { Settings, SettingsStore } from './Settings';
+@@ -65,6 +66,8 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private readonly hints = new HintEngine(browserStore());
++  private readonly lifetime = new LifetimeStats(browserStore());
++  private sinceAutosave = 0;
+   private readonly achievements = new AchievementBook(browserStore());
+   private readonly ghostStore = new GhostStore(browserStore());
+   private readonly ghostRecorder = new GhostRecorder();
+@@ -202,6 +205,7 @@ export class Game {
+     this.ghostRecorder.reset();
+     this.ghostClock = 0;
+     if (this.state.transition('playing')) {
++      this.lifetime.add({ runsStarted: 1 });
+       this.hud.showTitle(false);
+       this.hud.showHud(true);
+       this.hud.toast('Walk to the edge. Your lantern reveals hidden stones.', 4);
+@@ -209,7 +213,11 @@ export class Game {
+   }
+ 
+   private togglePause(): void {
+-    if (this.state.phase === 'playing' && this.state.transition('paused')) this.hud.showPause(true);
++    if (this.state.phase === 'playing' && this.state.transition('paused')) {
++      this.lifetime.save();
++      this.hud.setLifetime(this.lifetime.summary());
++      this.hud.showPause(true);
++    }
+     else if (this.state.phase === 'paused' && this.state.transition('playing')) {
+       this.hud.showPause(false);
+       this.lastTime = -1; // avoid a big time jump after resuming
+@@ -235,7 +243,10 @@ export class Game {
+     this.moverTime = 0;
+     this.fallLog.reset();
+     this.placePlayer();
+-    if (this.state.transition('playing')) this.hud.showWin(false);
++    if (this.state.transition('playing')) {
++      this.lifetime.add({ runsStarted: 1 });
++      this.hud.showWin(false);
++    }
+   }
+ 
+   private placePlayer(): void {
+@@ -253,6 +264,7 @@ export class Game {
+     if (fell) {
+       this.stats.falls++;
+       this.fallsSinceCheckpoint++;
++      this.lifetime.add({ falls: 1 });
+       this.fallLog.record(this.lastPlatform);
+     }
+     this.placePlayer();
+@@ -267,6 +279,8 @@ export class Game {
+     const p = this.player.body.pos;
+     this.sparkles.burst(p.x, p.y, p.z, 120, GOLD, 5, 4);
+     const worst = this.fallLog.worst();
++    this.lifetime.add({ runsCompleted: 1 });
++    this.lifetime.save();
+     this.progress.clear();
+     this.refreshContinue();
+     let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
+@@ -319,6 +333,12 @@ export class Game {
+         this.accumulator -= STEP;
+       }
+       this.stats.time += dt;
++      this.lifetime.add({ seconds: dt });
++      this.sinceAutosave += dt;
++      if (this.sinceAutosave >= 30) {
++        this.sinceAutosave = 0;
++        this.lifetime.save(); // so a closed tab loses at most half a minute
++      }
+     } else if (this.state.phase === 'menu') {
+       this.rig.rotate(0.12 * dt); // slow cinematic orbit behind the title screen
+     }
+@@ -355,6 +375,7 @@ export class Game {
+       const lp = this.player.lanternPos;
+       if (this.lantern.tryPulse()) {
+         this.pulsesFired++;
++        this.lifetime.add({ pulses: 1 });
+         this.audio.pulse();
+         this.sparkles.ring(lp.x, lp.y, lp.z, 60, GOLD, 9);
+         for (const b of BEACONS) if (!this.beaconsActive.has(b.id) && pulseReaches(b, lp)) this.activateBeacon(b);
+@@ -504,6 +525,7 @@ export class Game {
+ 
+   dispose(): void {
+     this.disposed = true;
++    this.lifetime.save();
+     this.renderer.setAnimationLoop(null);
+     this.resizeObserver.disconnect();
+     this.rig.dispose();
+diff --git a/lanternfall/src/core/LifetimeStats.ts b/lanternfall/src/core/LifetimeStats.ts
+new file mode 100644
+index 0000000..119257b
+--- /dev/null
++++ b/lanternfall/src/core/LifetimeStats.ts
+@@ -0,0 +1,79 @@
++import { KeyValueStore, readJson } from './storage';
++
++export interface LifetimeTotals {
++  runsStarted: number;
++  runsCompleted: number;
++  falls: number;
++  pulses: number;
++  /** Seconds spent playing (not paused, not on a menu). */
++  seconds: number;
++}
++
++const EMPTY: Readonly<LifetimeTotals> = { runsStarted: 0, runsCompleted: 0, falls: 0, pulses: 0, seconds: 0 };
++const FIELDS = Object.keys(EMPTY) as (keyof LifetimeTotals)[];
++
++/** Keep each field a finite number >= 0; anything else becomes 0. */
++export function sanitizeTotals(raw: unknown): LifetimeTotals {
++  const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
++  const out = { ...EMPTY };
++  for (const f of FIELDS) {
++    const v = r[f];
++    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) out[f] = v;
++  }
++  return out;
++}
++
++/** "45s", "12m" or "1h 05m". Short on purpose: it sits on the pause screen. */
++export function formatPlaytime(seconds: number): string {
++  const total = Math.max(0, Math.floor(seconds));
++  if (total < 60) return `${total}s`;
++  const minutes = Math.floor(total / 60);
++  if (minutes < 60) return `${minutes}m`;
++  return `${Math.floor(minutes / 60)}h ${(minutes % 60).toString().padStart(2, '0')}m`;
++}
++
++/**
++ * Running totals across every session. Adding is cheap (memory only); call `save()` at calm moments
++ * such as pausing or finishing a run, so the game does not write to storage every frame.
++ */
++export class LifetimeStats {
++  private totals: LifetimeTotals;
++  private dirty = false;
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly key = 'lanternfall.lifetime',
++  ) {
++    this.totals = sanitizeTotals(readJson(store, key));
++  }
++
++  get(): Readonly<LifetimeTotals> {
++    return this.totals;
++  }
++
++  /** Add to the totals. Negative, NaN and Infinity amounts are ignored. */
++  add(patch: Partial<LifetimeTotals>): void {
++    for (const f of FIELDS) {
++      const v = patch[f];
++      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue;
++      this.totals[f] += v;
++      this.dirty = true;
++    }
++  }
++
++  /** Write to storage if anything changed since the last save. Returns true if it wrote. */
++  save(): boolean {
++    if (!this.dirty) return false;
++    this.store.setItem(this.key, JSON.stringify(this.totals));
++    this.dirty = false;
++    return true;
++  }
++
++  /** One line for the pause screen, or '' before anything has been played. */
++  summary(): string {
++    const t = this.totals;
++    if (t.seconds < 1 && t.runsStarted === 0) return '';
++    const runs = `${t.runsCompleted} of ${t.runsStarted} runs finished`;
++    return `${formatPlaytime(t.seconds)} played  ·  ${t.falls} falls  ·  ${runs}`;
++  }
++}
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index 86a9d44..c628f46 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -56,6 +56,7 @@ export class Hud {
+       <div class="screen hidden" id="pause-screen">
+         <div class="panel">
+           <h2>Paused</h2>
++          <p id="lifetime" class="how"></p>
+           <div class="settings">
+             <label>Volume <input id="set-volume" type="range" min="${SETTING_LIMITS.volume.min}" max="${SETTING_LIMITS.volume.max}" step="0.05"></label>
+             <label>Camera speed <input id="set-sens" type="range" min="${SETTING_LIMITS.sensitivity.min}" max="${SETTING_LIMITS.sensitivity.max}" step="0.1"></label>
+@@ -123,6 +124,11 @@ export class Hud {
+ 
+   showTitle(on: boolean): void { this.show('#title-screen', on); }
+ 
++  /** Totals line on the pause screen (empty string hides it). */
++  setLifetime(text: string): void {
++    this.q('#lifetime').textContent = text;
++  }
++
+   /** Small line on the title screen such as "Achievements 2 of 7". Hidden when nothing is earned yet. */
+   setAchievementProgress(earned: number, total: number): void {
+     this.q('#title-achievements').textContent = earned > 0 ? `Achievements ${earned} of ${total}` : '';
+diff --git a/lanternfall/tests/LifetimeStats.test.ts b/lanternfall/tests/LifetimeStats.test.ts
+new file mode 100644
+index 0000000..6cb72c1
+--- /dev/null
++++ b/lanternfall/tests/LifetimeStats.test.ts
+@@ -0,0 +1,96 @@
++import { describe, expect, it } from 'vitest';
++import { LifetimeStats, formatPlaytime, sanitizeTotals } from '../src/core/LifetimeStats';
++import { MemoryStore } from '../src/core/storage';
++
++describe('formatPlaytime', () => {
++  it('uses seconds under a minute', () => {
++    expect(formatPlaytime(0)).toBe('0s');
++    expect(formatPlaytime(45.9)).toBe('45s');
++  });
++
++  it('uses minutes under an hour', () => {
++    expect(formatPlaytime(60)).toBe('1m');
++    expect(formatPlaytime(12 * 60 + 59)).toBe('12m');
++    expect(formatPlaytime(59 * 60 + 59)).toBe('59m');
++  });
++
++  it('uses hours and zero-padded minutes after that', () => {
++    expect(formatPlaytime(3600)).toBe('1h 00m');
++    expect(formatPlaytime(3600 + 5 * 60)).toBe('1h 05m');
++    expect(formatPlaytime(26 * 3600 + 30 * 60)).toBe('26h 30m');
++  });
++
++  it('treats negative values as zero', () => {
++    expect(formatPlaytime(-30)).toBe('0s');
++  });
++});
++
++describe('sanitizeTotals', () => {
++  it('returns zeros for garbage', () => {
++    for (const bad of [null, undefined, 4, 'x', [], {}]) {
++      expect(sanitizeTotals(bad)).toEqual({ runsStarted: 0, runsCompleted: 0, falls: 0, pulses: 0, seconds: 0 });
++    }
++  });
++
++  it('keeps valid fields and zeroes bad ones individually', () => {
++    const t = sanitizeTotals({ runsStarted: 3, falls: -2, pulses: 'many', seconds: NaN, runsCompleted: 1 });
++    expect(t).toEqual({ runsStarted: 3, runsCompleted: 1, falls: 0, pulses: 0, seconds: 0 });
++  });
++});
++
++describe('LifetimeStats', () => {
++  it('starts at zero with an empty summary', () => {
++    const s = new LifetimeStats(new MemoryStore());
++    expect(s.get().falls).toBe(0);
++    expect(s.summary()).toBe('');
++  });
++
++  it('adds up across calls', () => {
++    const s = new LifetimeStats(new MemoryStore());
++    s.add({ falls: 1 });
++    s.add({ falls: 2, pulses: 4 });
++    s.add({ seconds: 1.5 });
++    s.add({ seconds: 2.5 });
++    expect(s.get()).toMatchObject({ falls: 3, pulses: 4, seconds: 4 });
++  });
++
++  it('ignores negative, zero, NaN and infinite amounts', () => {
++    const s = new LifetimeStats(new MemoryStore());
++    s.add({ falls: -5, pulses: NaN, seconds: Infinity, runsStarted: 0 });
++    expect(s.get()).toEqual({ runsStarted: 0, runsCompleted: 0, falls: 0, pulses: 0, seconds: 0 });
++    expect(s.save()).toBe(false);
++  });
++
++  it('does not write until save, and only writes when something changed', () => {
++    const mem = new MemoryStore();
++    const s = new LifetimeStats(mem);
++    s.add({ falls: 1 });
++    expect(mem.getItem('lanternfall.lifetime')).toBeNull();
++    expect(s.save()).toBe(true);
++    expect(mem.getItem('lanternfall.lifetime')).not.toBeNull();
++    expect(s.save()).toBe(false);
++  });
++
++  it('reloads saved totals in a new session and keeps adding', () => {
++    const mem = new MemoryStore();
++    const a = new LifetimeStats(mem);
++    a.add({ falls: 4, seconds: 90 });
++    a.save();
++    const b = new LifetimeStats(mem);
++    expect(b.get()).toMatchObject({ falls: 4, seconds: 90 });
++    b.add({ falls: 1 });
++    expect(b.get().falls).toBe(5);
++  });
++
++  it('survives corrupt saved data', () => {
++    const mem = new MemoryStore();
++    mem.setItem('lanternfall.lifetime', '{oops');
++    expect(new LifetimeStats(mem).get().seconds).toBe(0);
++  });
++
++  it('summary reads naturally', () => {
++    const s = new LifetimeStats(new MemoryStore());
++    s.add({ seconds: 125, falls: 7, runsStarted: 3, runsCompleted: 1 });
++    expect(s.summary()).toBe('2m played  ·  7 falls  ·  1 of 3 runs finished');
++  });
++});
+-- 
+2.43.0
+

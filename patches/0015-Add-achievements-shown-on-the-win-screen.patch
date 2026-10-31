@@ -1,0 +1,361 @@
+From b741fd5d78329f9cf46312ad95c1159b987bc385 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 11:02:59 +0000
+Subject: [PATCH 15/18] Add achievements shown on the win screen
+
+Seven achievements, unlocked once and remembered. Time targets are named
+constants and design guesses until real players are timed. Continued runs
+never earn achievements.
+---
+ lanternfall/src/core/Achievements.ts   | 115 +++++++++++++++++++++++++
+ lanternfall/src/core/Game.ts           |  10 ++-
+ lanternfall/src/ui/Hud.ts              |  10 ++-
+ lanternfall/tests/Achievements.test.ts | 114 ++++++++++++++++++++++++
+ 4 files changed, 247 insertions(+), 2 deletions(-)
+ create mode 100644 lanternfall/src/core/Achievements.ts
+ create mode 100644 lanternfall/tests/Achievements.test.ts
+
+diff --git a/lanternfall/src/core/Achievements.ts b/lanternfall/src/core/Achievements.ts
+new file mode 100644
+index 0000000..19ca537
+--- /dev/null
++++ b/lanternfall/src/core/Achievements.ts
+@@ -0,0 +1,115 @@
++import { KeyValueStore, readJson } from './storage';
++
++/** What happened in a finished run. */
++export interface RunSummary {
++  /** Seconds from start to gate. */
++  time: number;
++  falls: number;
++  /** Lantern pulses fired. */
++  pulses: number;
++  /** Completed runs including this one (from Records). */
++  totalRuns: number;
++}
++
++export interface AchievementDef {
++  id: string;
++  title: string;
++  description: string;
++  earned: (run: RunSummary) => boolean;
++}
++
++/**
++ * Time targets are design guesses, not measured data. Nobody has timed real players yet,
++ * so they are named constants that are easy to retune after playtesting.
++ */
++export const QUICK_TIME = 120;
++export const FAST_TIME = 75;
++export const FEW_PULSES = 3;
++export const PERSISTENT_FALLS = 10;
++export const VETERAN_RUNS = 5;
++
++export const ACHIEVEMENTS: readonly AchievementDef[] = [
++  {
++    id: 'first-light',
++    title: 'First light',
++    description: 'Reach the golden gate.',
++    earned: () => true,
++  },
++  {
++    id: 'flawless',
++    title: 'Flawless',
++    description: 'Finish without falling once.',
++    earned: (r) => r.falls === 0,
++  },
++  {
++    id: 'quick',
++    title: 'Quick feet',
++    description: `Finish in under ${QUICK_TIME} seconds.`,
++    earned: (r) => r.time < QUICK_TIME,
++  },
++  {
++    id: 'fast',
++    title: 'Lightning',
++    description: `Finish in under ${FAST_TIME} seconds.`,
++    earned: (r) => r.time < FAST_TIME,
++  },
++  {
++    id: 'frugal',
++    title: 'Frugal light',
++    description: `Finish using at most ${FEW_PULSES} pulses.`,
++    earned: (r) => r.pulses <= FEW_PULSES,
++  },
++  {
++    id: 'persistent',
++    title: 'Never give up',
++    description: `Finish after ${PERSISTENT_FALLS} or more falls.`,
++    earned: (r) => r.falls >= PERSISTENT_FALLS,
++  },
++  {
++    id: 'veteran',
++    title: 'Tower regular',
++    description: `Finish the tower ${VETERAN_RUNS} times.`,
++    earned: (r) => r.totalRuns >= VETERAN_RUNS,
++  },
++];
++
++/** Keeps only string ids from whatever was saved. */
++export function sanitizeEarned(raw: unknown): string[] {
++  if (!Array.isArray(raw)) return [];
++  return raw.filter((v): v is string => typeof v === 'string');
++}
++
++/** Unlocks achievements at the end of a run and remembers them between sessions. */
++export class AchievementBook {
++  private readonly earned: Set<string>;
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly defs: readonly AchievementDef[] = ACHIEVEMENTS,
++    private readonly key = 'lanternfall.achievements',
++  ) {
++    const known = new Set(defs.map((d) => d.id));
++    this.earned = new Set(sanitizeEarned(readJson(store, key)).filter((id) => known.has(id)));
++  }
++
++  has(id: string): boolean {
++    return this.earned.has(id);
++  }
++
++  get count(): number {
++    return this.earned.size;
++  }
++
++  get total(): number {
++    return this.defs.length;
++  }
++
++  /** Check a finished run. Returns only the achievements unlocked for the first time. */
++  evaluate(run: RunSummary): AchievementDef[] {
++    const fresh = this.defs.filter((d) => !this.earned.has(d.id) && d.earned(run));
++    if (fresh.length === 0) return [];
++    for (const d of fresh) this.earned.add(d.id);
++    this.store.setItem(this.key, JSON.stringify([...this.earned]));
++    return fresh;
++  }
++}
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 9e30df4..bb6561b 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -17,6 +17,7 @@ import {
+ import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
+ import { EventBus } from './EventBus';
+ import { FallLog } from './FallLog';
++import { AchievementBook } from './Achievements';
+ import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
+ import { HintEngine } from './Hints';
+ import { ProgressStore } from './Progress';
+@@ -64,6 +65,7 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private readonly hints = new HintEngine(browserStore());
++  private readonly achievements = new AchievementBook(browserStore());
+   private readonly ghostStore = new GhostStore(browserStore());
+   private readonly ghostRecorder = new GhostRecorder();
+   /** Best run so far, shown as a translucent runner. Null until a full run has been finished. */
+@@ -126,6 +128,7 @@ export class Game {
+     this.applySettings(this.settings.get());
+     this.hud.setSettings(this.settings.get());
+     this.refreshContinue();
++    this.hud.setAchievementProgress(this.achievements.count, this.achievements.total);
+     this.hud.showTitle(true);
+ 
+     this.resizeObserver = new ResizeObserver(() => this.resize());
+@@ -267,6 +270,7 @@ export class Game {
+     this.progress.clear();
+     this.refreshContinue();
+     let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
++    let unlocked: string[] = [];
+     if (!this.stats.continued) {
+       const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
+       const { bestTime, fewestFalls } = out.record;
+@@ -279,10 +283,14 @@ export class Game {
+           bestLine += '  ·  Ghost saved';
+         }
+       }
++      unlocked = this.achievements
++        .evaluate({ time: this.stats.time, falls: this.stats.falls, pulses: this.pulsesFired, totalRuns: out.record.runs })
++        .map((a) => a.title);
++      this.hud.setAchievementProgress(this.achievements.count, this.achievements.total);
+       if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
+       else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
+     }
+-    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine);
++    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine, unlocked);
+   }
+ 
+   // --- main loop -------------------------------------------------------------
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index fbbc23c..86a9d44 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -34,6 +34,7 @@ export class Hud {
+             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
+           </ul>
+           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
++          <p id="title-achievements" class="how"></p>
+           <button id="btn-continue" class="hidden">Continue</button>
+           <button id="btn-start">Begin</button>
+         </div>
+@@ -73,6 +74,7 @@ export class Hud {
+           <p class="tag">You found the light's path through the ruins.</p>
+           <p id="win-stats"></p>
+           <p id="win-best" class="best"></p>
++          <p id="win-achievements" class="best"></p>
+           <button id="btn-restart">Play again</button>
+         </div>
+       </div>
+@@ -121,6 +123,11 @@ export class Hud {
+ 
+   showTitle(on: boolean): void { this.show('#title-screen', on); }
+ 
++  /** Small line on the title screen such as "Achievements 2 of 7". Hidden when nothing is earned yet. */
++  setAchievementProgress(earned: number, total: number): void {
++    this.q('#title-achievements').textContent = earned > 0 ? `Achievements ${earned} of ${total}` : '';
++  }
++
+   /** Show the Continue button with a label such as "Continue (checkpoint 2 of 4)", or hide it with null. */
+   setContinue(label: string | null): void {
+     this.show('#btn-continue', label !== null);
+@@ -130,13 +137,14 @@ export class Hud {
+   showPause(on: boolean): void { this.show('#pause-screen', on); }
+ 
+   /** `bestLine` is a second line such as "New best time!" or "Best 1:20.4 · fewest falls 2". */
+-  showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = ''): void {
++  showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = '', unlocked: readonly string[] = []): void {
+     if (on) {
+       const m = Math.floor(seconds / 60);
+       const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+       const extra = toughest ? `  ·  Most falls: ${toughest}` : '';
+       this.q('#win-stats').textContent = `Time ${m}:${s}  ·  Falls ${falls}${extra}`;
+       this.q('#win-best').textContent = bestLine;
++      this.q('#win-achievements').textContent = unlocked.length > 0 ? `Unlocked: ${unlocked.join(', ')}` : '';
+     }
+     this.show('#win-screen', on);
+   }
+diff --git a/lanternfall/tests/Achievements.test.ts b/lanternfall/tests/Achievements.test.ts
+new file mode 100644
+index 0000000..88f6798
+--- /dev/null
++++ b/lanternfall/tests/Achievements.test.ts
+@@ -0,0 +1,114 @@
++import { describe, expect, it } from 'vitest';
++import {
++  ACHIEVEMENTS, AchievementBook, AchievementDef, FAST_TIME, FEW_PULSES, PERSISTENT_FALLS,
++  QUICK_TIME, RunSummary, VETERAN_RUNS, sanitizeEarned,
++} from '../src/core/Achievements';
++import { MemoryStore } from '../src/core/storage';
++
++const run = (patch: Partial<RunSummary> = {}): RunSummary => ({ time: 200, falls: 4, pulses: 8, totalRuns: 1, ...patch });
++const ids = (list: AchievementDef[]): string[] => list.map((d) => d.id).sort();
++
++describe('ACHIEVEMENTS data', () => {
++  it('has unique ids with a title and description each', () => {
++    const all = ACHIEVEMENTS.map((a) => a.id);
++    expect(new Set(all).size).toBe(all.length);
++    for (const a of ACHIEVEMENTS) {
++      expect(a.title.length).toBeGreaterThan(2);
++      expect(a.description.length).toBeGreaterThan(8);
++    }
++  });
++
++  it('time targets are ordered: lightning is stricter than quick', () => {
++    expect(FAST_TIME).toBeLessThan(QUICK_TIME);
++  });
++});
++
++describe('AchievementBook.evaluate', () => {
++  it('an ordinary finish only earns first light', () => {
++    const book = new AchievementBook(new MemoryStore());
++    expect(ids(book.evaluate(run()))).toEqual(['first-light']);
++  });
++
++  it('flawless needs exactly zero falls', () => {
++    expect(ids(new AchievementBook(new MemoryStore()).evaluate(run({ falls: 0 })))).toContain('flawless');
++    expect(ids(new AchievementBook(new MemoryStore()).evaluate(run({ falls: 1 })))).not.toContain('flawless');
++  });
++
++  it('time achievements use strict less-than', () => {
++    const at = (time: number): string[] => ids(new AchievementBook(new MemoryStore()).evaluate(run({ time })));
++    expect(at(QUICK_TIME)).not.toContain('quick');
++    expect(at(QUICK_TIME - 0.1)).toContain('quick');
++    expect(at(FAST_TIME)).not.toContain('fast');
++    expect(at(FAST_TIME - 0.1)).toContain('fast');
++  });
++
++  it('a very fast run earns both time achievements', () => {
++    const got = ids(new AchievementBook(new MemoryStore()).evaluate(run({ time: 60 })));
++    expect(got).toContain('quick');
++    expect(got).toContain('fast');
++  });
++
++  it('frugal allows up to the limit', () => {
++    const at = (pulses: number): string[] => ids(new AchievementBook(new MemoryStore()).evaluate(run({ pulses })));
++    expect(at(FEW_PULSES)).toContain('frugal');
++    expect(at(FEW_PULSES + 1)).not.toContain('frugal');
++  });
++
++  it('persistent and veteran trigger at their thresholds', () => {
++    const f = (falls: number): string[] => ids(new AchievementBook(new MemoryStore()).evaluate(run({ falls })));
++    expect(f(PERSISTENT_FALLS - 1)).not.toContain('persistent');
++    expect(f(PERSISTENT_FALLS)).toContain('persistent');
++    const r = (totalRuns: number): string[] => ids(new AchievementBook(new MemoryStore()).evaluate(run({ totalRuns })));
++    expect(r(VETERAN_RUNS - 1)).not.toContain('veteran');
++    expect(r(VETERAN_RUNS)).toContain('veteran');
++  });
++
++  it('only reports achievements the first time they are earned', () => {
++    const book = new AchievementBook(new MemoryStore());
++    expect(book.evaluate(run({ falls: 0 })).length).toBeGreaterThan(0);
++    expect(book.evaluate(run({ falls: 0 }))).toEqual([]);
++  });
++
++  it('counts what has been earned', () => {
++    const book = new AchievementBook(new MemoryStore());
++    expect(book.count).toBe(0);
++    book.evaluate(run({ falls: 0 }));
++    expect(book.count).toBe(2);
++    expect(book.total).toBe(ACHIEVEMENTS.length);
++    expect(book.has('flawless')).toBe(true);
++    expect(book.has('fast')).toBe(false);
++  });
++});
++
++describe('AchievementBook persistence', () => {
++  it('remembers achievements between sessions', () => {
++    const mem = new MemoryStore();
++    new AchievementBook(mem).evaluate(run({ falls: 0 }));
++    const again = new AchievementBook(mem);
++    expect(again.has('flawless')).toBe(true);
++    expect(again.evaluate(run({ falls: 0 }))).toEqual([]);
++  });
++
++  it('survives corrupt data and drops ids that no longer exist', () => {
++    const mem = new MemoryStore();
++    mem.setItem('lanternfall.achievements', '{nope');
++    expect(new AchievementBook(mem).count).toBe(0);
++    mem.setItem('lanternfall.achievements', JSON.stringify(['flawless', 'removed-long-ago', 5, null]));
++    const book = new AchievementBook(mem);
++    expect(book.count).toBe(1);
++    expect(book.has('flawless')).toBe(true);
++  });
++
++  it('works with a custom list of achievements', () => {
++    const custom: AchievementDef[] = [{ id: 'x', title: 'Ex ex', description: 'always earned', earned: () => true }];
++    const book = new AchievementBook(new MemoryStore(), custom);
++    expect(ids(book.evaluate(run()))).toEqual(['x']);
++    expect(book.total).toBe(1);
++  });
++
++  it('sanitizeEarned ignores non-arrays', () => {
++    expect(sanitizeEarned('x')).toEqual([]);
++    expect(sanitizeEarned({})).toEqual([]);
++    expect(sanitizeEarned(['a', 1])).toEqual(['a']);
++  });
++});
+-- 
+2.43.0
+

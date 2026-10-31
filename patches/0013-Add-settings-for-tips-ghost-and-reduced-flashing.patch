@@ -1,0 +1,239 @@
+From cc7f8e5955f1a0a67e4acfc895a699ec42be9739 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 11:00:13 +0000
+Subject: [PATCH 13/18] Add settings for tips, ghost and reduced flashing
+
+Old saves load with defaults. With tips off the hint engine is not
+consulted, so tips are not marked as seen while hidden.
+---
+ lanternfall/src/core/Game.ts       |  7 ++++--
+ lanternfall/src/core/Settings.ts   | 24 +++++++++++++++++--
+ lanternfall/src/ui/Hud.ts          | 19 +++++++++++++--
+ lanternfall/tests/Settings.test.ts | 38 +++++++++++++++++++++++++++++-
+ 4 files changed, 81 insertions(+), 7 deletions(-)
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 60b495f..195203f 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -20,7 +20,7 @@ import { FallLog } from './FallLog';
+ import { HintEngine } from './Hints';
+ import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+-import { SettingsStore } from './Settings';
++import { Settings, SettingsStore } from './Settings';
+ import { SplitBook, formatDelta } from './Splits';
+ import { browserStore } from './storage';
+ import { GameState } from './GameState';
+@@ -123,10 +123,11 @@ export class Game {
+     void this.loadCharacter();
+   }
+ 
+-  private applySettings(v: Readonly<{ volume: number; sensitivity: number; invertY: boolean }>): void {
++  private applySettings(v: Readonly<Settings>): void {
+     this.audio.setVolume(v.volume);
+     this.rig.sensitivity = v.sensitivity;
+     this.rig.invertY = v.invertY;
++    this.hud.reduceFlash = v.reduceFlash;
+   }
+ 
+   /** Load the FBX character in the background; the built-in character is used until (or unless) it loads. */
+@@ -401,6 +402,8 @@ export class Game {
+   }
+ 
+   private showHint(dt: number): void {
++    // Tips switched off: do not even ask, or the engine would mark them as seen and they would be lost.
++    if (!this.settings.get().showHints) return;
+     const hint = this.hints.update(dt, {
+       platformId: this.standingOn,
+       pulsesFired: this.pulsesFired,
+diff --git a/lanternfall/src/core/Settings.ts b/lanternfall/src/core/Settings.ts
+index 5626789..84596e1 100644
+--- a/lanternfall/src/core/Settings.ts
++++ b/lanternfall/src/core/Settings.ts
+@@ -6,9 +6,22 @@ export interface Settings {
+   /** Camera turn speed multiplier. */
+   sensitivity: number;
+   invertY: boolean;
++  /** Show one-time tips (see Hints.ts). */
++  showHints: boolean;
++  /** Show the translucent ghost of your best run. */
++  showGhost: boolean;
++  /** Skip the dark flash when you fall and respawn. */
++  reduceFlash: boolean;
+ }
+ 
+-export const DEFAULT_SETTINGS: Readonly<Settings> = { volume: 0.5, sensitivity: 1, invertY: false };
++export const DEFAULT_SETTINGS: Readonly<Settings> = {
++  volume: 0.5,
++  sensitivity: 1,
++  invertY: false,
++  showHints: true,
++  showGhost: true,
++  reduceFlash: false,
++};
+ export const SETTING_LIMITS = {
+   volume: { min: 0, max: 1 },
+   sensitivity: { min: 0.3, max: 2.5 },
+@@ -16,6 +29,10 @@ export const SETTING_LIMITS = {
+ 
+ const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+ 
++function bool(raw: unknown, fallback: boolean): boolean {
++  return typeof raw === 'boolean' ? raw : fallback;
++}
++
+ function num(raw: unknown, fallback: number, lo: number, hi: number): number {
+   return typeof raw === 'number' && Number.isFinite(raw) ? clamp(raw, lo, hi) : fallback;
+ }
+@@ -26,7 +43,10 @@ export function sanitizeSettings(raw: unknown): Settings {
+   return {
+     volume: num(r.volume, DEFAULT_SETTINGS.volume, SETTING_LIMITS.volume.min, SETTING_LIMITS.volume.max),
+     sensitivity: num(r.sensitivity, DEFAULT_SETTINGS.sensitivity, SETTING_LIMITS.sensitivity.min, SETTING_LIMITS.sensitivity.max),
+-    invertY: typeof r.invertY === 'boolean' ? r.invertY : DEFAULT_SETTINGS.invertY,
++    invertY: bool(r.invertY, DEFAULT_SETTINGS.invertY),
++    showHints: bool(r.showHints, DEFAULT_SETTINGS.showHints),
++    showGhost: bool(r.showGhost, DEFAULT_SETTINGS.showGhost),
++    reduceFlash: bool(r.reduceFlash, DEFAULT_SETTINGS.reduceFlash),
+   };
+ }
+ 
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index f27ca2e..fbbc23c 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -1,5 +1,7 @@
+ import { SETTING_LIMITS, Settings } from '../core/Settings';
+ 
++const SETTING_INPUTS = ['#set-volume', '#set-sens', '#set-invert', '#set-hints', '#set-ghost', '#set-flash'];
++
+ /** All on-screen text and buttons. Plain DOM (no framework) so it is easy to read and change. */
+ export class Hud {
+   onStart: () => void = () => {};
+@@ -7,6 +9,8 @@ export class Hud {
+   onResume: () => void = () => {};
+   onRestart: () => void = () => {};
+   onSettings: (patch: Partial<Settings>) => void = () => {};
++  /** When true the respawn flash is skipped (accessibility). */
++  reduceFlash = false;
+ 
+   private readonly root = document.createElement('div');
+   private readonly q = <T extends HTMLElement>(sel: string): T => this.root.querySelector(sel) as T;
+@@ -55,6 +59,9 @@ export class Hud {
+             <label>Volume <input id="set-volume" type="range" min="${SETTING_LIMITS.volume.min}" max="${SETTING_LIMITS.volume.max}" step="0.05"></label>
+             <label>Camera speed <input id="set-sens" type="range" min="${SETTING_LIMITS.sensitivity.min}" max="${SETTING_LIMITS.sensitivity.max}" step="0.1"></label>
+             <label class="check"><input id="set-invert" type="checkbox"> Invert camera Y</label>
++            <label class="check"><input id="set-hints" type="checkbox"> Show tips</label>
++            <label class="check"><input id="set-ghost" type="checkbox"> Show ghost of best run</label>
++            <label class="check"><input id="set-flash" type="checkbox"> Reduce screen flashing</label>
+           </div>
+           <button id="btn-resume">Resume</button>
+         </div>
+@@ -78,7 +85,7 @@ export class Hud {
+     this.q('#btn-continue').addEventListener('click', this.continueRun);
+     this.q('#btn-resume').addEventListener('click', this.resume);
+     this.q('#btn-restart').addEventListener('click', this.restart);
+-    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).addEventListener('input', this.settingsInput);
++    for (const id of SETTING_INPUTS) this.q(id).addEventListener('input', this.settingsInput);
+   }
+ 
+   private settingsInput = (): void => {
+@@ -86,6 +93,9 @@ export class Hud {
+       volume: Number(this.q<HTMLInputElement>('#set-volume').value),
+       sensitivity: Number(this.q<HTMLInputElement>('#set-sens').value),
+       invertY: this.q<HTMLInputElement>('#set-invert').checked,
++      showHints: this.q<HTMLInputElement>('#set-hints').checked,
++      showGhost: this.q<HTMLInputElement>('#set-ghost').checked,
++      reduceFlash: this.q<HTMLInputElement>('#set-flash').checked,
+     });
+   };
+ 
+@@ -94,6 +104,10 @@ export class Hud {
+     this.q<HTMLInputElement>('#set-volume').value = String(s.volume);
+     this.q<HTMLInputElement>('#set-sens').value = String(s.sensitivity);
+     this.q<HTMLInputElement>('#set-invert').checked = s.invertY;
++    this.q<HTMLInputElement>('#set-hints').checked = s.showHints;
++    this.q<HTMLInputElement>('#set-ghost').checked = s.showGhost;
++    this.q<HTMLInputElement>('#set-flash').checked = s.reduceFlash;
++    this.reduceFlash = s.reduceFlash;
+   }
+ 
+   private start = (): void => this.onStart();
+@@ -151,6 +165,7 @@ export class Hud {
+ 
+   /** Brief dark flash when you fall and respawn. */
+   flash(): void {
++    if (this.reduceFlash) return;
+     const el = this.q<HTMLElement>('#flash');
+     el.classList.add('on');
+     window.clearTimeout(this.flashTimer);
+@@ -164,7 +179,7 @@ export class Hud {
+     this.q('#btn-continue').removeEventListener('click', this.continueRun);
+     this.q('#btn-resume').removeEventListener('click', this.resume);
+     this.q('#btn-restart').removeEventListener('click', this.restart);
+-    for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).removeEventListener('input', this.settingsInput);
++    for (const id of SETTING_INPUTS) this.q(id).removeEventListener('input', this.settingsInput);
+     this.root.remove();
+   }
+ }
+diff --git a/lanternfall/tests/Settings.test.ts b/lanternfall/tests/Settings.test.ts
+index 99191ad..ee12eaf 100644
+--- a/lanternfall/tests/Settings.test.ts
++++ b/lanternfall/tests/Settings.test.ts
+@@ -23,9 +23,26 @@ describe('sanitizeSettings', () => {
+ 
+   it('keeps valid fields even when others are bad', () => {
+     expect(sanitizeSettings({ volume: 0.2, invertY: true, sensitivity: 'fast' })).toEqual({
+-      volume: 0.2, sensitivity: DEFAULT_SETTINGS.sensitivity, invertY: true,
++      ...DEFAULT_SETTINGS, volume: 0.2, sensitivity: DEFAULT_SETTINGS.sensitivity, invertY: true,
+     });
+   });
++
++  it('defaults the accessibility options sensibly: tips and ghost on, flashing on', () => {
++    expect(DEFAULT_SETTINGS.showHints).toBe(true);
++    expect(DEFAULT_SETTINGS.showGhost).toBe(true);
++    expect(DEFAULT_SETTINGS.reduceFlash).toBe(false);
++  });
++
++  it('accepts the new boolean options and rejects non-booleans', () => {
++    const s = sanitizeSettings({ showHints: false, showGhost: false, reduceFlash: true });
++    expect(s.showHints).toBe(false);
++    expect(s.showGhost).toBe(false);
++    expect(s.reduceFlash).toBe(true);
++    const bad = sanitizeSettings({ showHints: 'no', showGhost: 0, reduceFlash: null });
++    expect(bad.showHints).toBe(true);
++    expect(bad.showGhost).toBe(true);
++    expect(bad.reduceFlash).toBe(false);
++  });
+ });
+ 
+ describe('SettingsStore', () => {
+@@ -66,6 +83,25 @@ describe('SettingsStore', () => {
+     expect(fn).toHaveBeenCalledTimes(1);
+   });
+ 
++  it('old saves without the new options load with their defaults', () => {
++    const mem = new MemoryStore();
++    mem.setItem('lanternfall.settings', JSON.stringify({ volume: 0.3, sensitivity: 1.5, invertY: true }));
++    const s = new SettingsStore(mem).get();
++    expect(s.volume).toBe(0.3);
++    expect(s.invertY).toBe(true);
++    expect(s.showHints).toBe(true);
++    expect(s.reduceFlash).toBe(false);
++  });
++
++  it('saves the new options', () => {
++    const mem = new MemoryStore();
++    new SettingsStore(mem).set({ reduceFlash: true, showGhost: false });
++    const again = new SettingsStore(mem).get();
++    expect(again.reduceFlash).toBe(true);
++    expect(again.showGhost).toBe(false);
++    expect(again.showHints).toBe(true);
++  });
++
+   it('reset restores defaults', () => {
+     const s = new SettingsStore(new MemoryStore());
+     s.set({ volume: 0, invertY: true });
+-- 
+2.43.0
+

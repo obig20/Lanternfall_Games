@@ -1,0 +1,204 @@
+From dd39ca05f4e04f1de174857bf424e033a33c784c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 10:51:48 +0000
+Subject: [PATCH 11/18] Add checkpoint splits: show pace against your best time
+ to each checkpoint
+
+Splits are only recorded for runs that start at the beginning of the tower.
+---
+ lanternfall/src/core/Game.ts     | 11 ++++-
+ lanternfall/src/core/Splits.ts   | 60 ++++++++++++++++++++++++
+ lanternfall/tests/Splits.test.ts | 78 ++++++++++++++++++++++++++++++++
+ 3 files changed, 148 insertions(+), 1 deletion(-)
+ create mode 100644 lanternfall/src/core/Splits.ts
+ create mode 100644 lanternfall/tests/Splits.test.ts
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index fbfa2e0..60b495f 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -21,6 +21,7 @@ import { HintEngine } from './Hints';
+ import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+ import { SettingsStore } from './Settings';
++import { SplitBook, formatDelta } from './Splits';
+ import { browserStore } from './storage';
+ import { GameState } from './GameState';
+ 
+@@ -62,6 +63,7 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private readonly hints = new HintEngine(browserStore());
++  private readonly splits = new SplitBook(browserStore(), CHECKPOINTS.length);
+   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
+   private unsubscribeSettings: () => void = () => {};
+   private readonly touch: TouchControls | null;
+@@ -417,7 +419,14 @@ export class Game {
+     this.audio.checkpoint();
+     this.sparkles.burst(c.x, c.y + 1, c.z, 40, GOLD, 3, 3);
+     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
+-    this.hud.toast('Checkpoint reached');
++    // Splits only make sense for runs that started at the beginning of the tower.
++    const split = this.stats.continued ? null : this.splits.record(index, this.stats.time);
++    if (split) {
++      const pace = split.delta === null ? 'first time here' : formatDelta(split.delta) + (split.isBest ? ' (best!)' : ' vs best');
++      this.hud.toast(`Checkpoint ${formatTime(split.time)}  ·  ${pace}`, 3);
++    } else {
++      this.hud.toast('Checkpoint reached');
++    }
+     if (this.progress.reach(index)) this.refreshContinue();
+     this.applyCheckpointObjective(c.id);
+   }
+diff --git a/lanternfall/src/core/Splits.ts b/lanternfall/src/core/Splits.ts
+new file mode 100644
+index 0000000..5465b1a
+--- /dev/null
++++ b/lanternfall/src/core/Splits.ts
+@@ -0,0 +1,60 @@
++import { KeyValueStore, readJson } from './storage';
++
++export interface SplitResult {
++  /** Seconds this checkpoint took to reach. */
++  time: number;
++  /** This time minus the previous best (negative = faster). Null on the first ever split. */
++  delta: number | null;
++  isBest: boolean;
++}
++
++/** "+1.3s" or "-0.4s" (one decimal). Exactly zero shows as "+0.0s". */
++export function formatDelta(delta: number): string {
++  const rounded = Math.round(Math.abs(delta) * 10) / 10;
++  const sign = delta < 0 && rounded > 0 ? '-' : '+';
++  return `${sign}${rounded.toFixed(1)}s`;
++}
++
++/**
++ * Best time to reach each checkpoint, so the player sees whether they are ahead of
++ * or behind their own pace. Times are measured from the start of a full run.
++ */
++export class SplitBook {
++  private best: (number | null)[];
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly count: number,
++    private readonly key = 'lanternfall.splits',
++  ) {
++    this.best = SplitBook.sanitize(readJson(store, key), count);
++  }
++
++  /** Always returns exactly `count` entries; anything invalid becomes null. */
++  static sanitize(raw: unknown, count: number): (number | null)[] {
++    const out: (number | null)[] = Array.from({ length: count }, () => null);
++    if (!Array.isArray(raw)) return out;
++    for (let i = 0; i < count; i++) {
++      const v: unknown = raw[i];
++      if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[i] = v;
++    }
++    return out;
++  }
++
++  bestFor(index: number): number | null {
++    return this.best[index] ?? null;
++  }
++
++  /** Record a split. Out-of-range indices and non-positive times are ignored (returns null). */
++  record(index: number, time: number): SplitResult | null {
++    if (!Number.isInteger(index) || index < 0 || index >= this.count) return null;
++    if (!Number.isFinite(time) || time <= 0) return null;
++    const previous = this.best[index];
++    const isBest = previous === null || time < previous;
++    if (isBest) {
++      this.best[index] = time;
++      this.store.setItem(this.key, JSON.stringify(this.best));
++    }
++    return { time, delta: previous === null ? null : time - previous, isBest };
++  }
++}
+diff --git a/lanternfall/tests/Splits.test.ts b/lanternfall/tests/Splits.test.ts
+new file mode 100644
+index 0000000..a951f9a
+--- /dev/null
++++ b/lanternfall/tests/Splits.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, it } from 'vitest';
++import { SplitBook, formatDelta } from '../src/core/Splits';
++import { MemoryStore } from '../src/core/storage';
++
++describe('formatDelta', () => {
++  it('shows a plus for slower and a minus for faster', () => {
++    expect(formatDelta(1.26)).toBe('+1.3s');
++    expect(formatDelta(-0.44)).toBe('-0.4s');
++  });
++
++  it('never shows "-0.0s"', () => {
++    expect(formatDelta(-0.01)).toBe('+0.0s');
++    expect(formatDelta(0)).toBe('+0.0s');
++  });
++
++  it('handles minutes worth of seconds', () => {
++    expect(formatDelta(75.04)).toBe('+75.0s');
++  });
++});
++
++describe('SplitBook.sanitize', () => {
++  it('pads, trims and cleans to the requested length', () => {
++    expect(SplitBook.sanitize([5, 'x', -1, 9, 10], 4)).toEqual([5, null, null, 9]);
++    expect(SplitBook.sanitize([5], 3)).toEqual([5, null, null]);
++    expect(SplitBook.sanitize('nope', 2)).toEqual([null, null]);
++    expect(SplitBook.sanitize([NaN, Infinity, 0], 3)).toEqual([null, null, null]);
++  });
++});
++
++describe('SplitBook', () => {
++  it('the first split has no delta and counts as best', () => {
++    const b = new SplitBook(new MemoryStore(), 3);
++    expect(b.record(0, 30)).toEqual({ time: 30, delta: null, isBest: true });
++    expect(b.bestFor(0)).toBe(30);
++  });
++
++  it('a faster time beats the old best and reports the gap', () => {
++    const b = new SplitBook(new MemoryStore(), 3);
++    b.record(1, 50);
++    const r = b.record(1, 46.5);
++    expect(r?.isBest).toBe(true);
++    expect(r?.delta).toBeCloseTo(-3.5);
++    expect(b.bestFor(1)).toBe(46.5);
++  });
++
++  it('a slower time reports a positive delta and keeps the best', () => {
++    const b = new SplitBook(new MemoryStore(), 3);
++    b.record(2, 40);
++    const r = b.record(2, 43);
++    expect(r?.isBest).toBe(false);
++    expect(r?.delta).toBeCloseTo(3);
++    expect(b.bestFor(2)).toBe(40);
++  });
++
++  it('ignores invalid input without changing anything', () => {
++    const b = new SplitBook(new MemoryStore(), 2);
++    expect(b.record(-1, 10)).toBeNull();
++    expect(b.record(2, 10)).toBeNull();
++    expect(b.record(0.5, 10)).toBeNull();
++    expect(b.record(0, 0)).toBeNull();
++    expect(b.record(0, NaN)).toBeNull();
++    expect(b.bestFor(0)).toBeNull();
++  });
++
++  it('persists bests across instances and survives corrupt data', () => {
++    const store = new MemoryStore();
++    new SplitBook(store, 3).record(0, 12);
++    expect(new SplitBook(store, 3).bestFor(0)).toBe(12);
++    store.setItem('lanternfall.splits', '{bad json');
++    expect(new SplitBook(store, 3).bestFor(0)).toBeNull();
++  });
++
++  it('bestFor is null for unknown indices', () => {
++    const b = new SplitBook(new MemoryStore(), 2);
++    expect(b.bestFor(5)).toBeNull();
++    expect(b.bestFor(-1)).toBeNull();
++  });
++});
+-- 
+2.43.0
+

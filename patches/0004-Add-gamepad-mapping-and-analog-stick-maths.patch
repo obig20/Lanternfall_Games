@@ -1,0 +1,257 @@
+From ba41387dd4c1899cfddfaf7fa90c407b71a95eac Mon Sep 17 00:00:00 2001
+From: obig20 <obig20@example.com>
+Date: Fri, 30 Oct 2026 18:30:25 +0000
+Subject: [PATCH 04/18] Add gamepad mapping and analog stick maths
+
+radialDeadzone rescales so there is no jump at the deadzone edge; readPad maps the
+standard layout (A jump, X/RT/RB pulse, Y restart, Start pause) and tolerates odd
+controllers. PadEdges turns held buttons into per-frame presses. 16 new tests.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ lanternfall/src/input/GamepadMap.ts |  73 ++++++++++++++++++
+ lanternfall/src/input/analog.ts     |  30 ++++++++
+ lanternfall/tests/Input.test.ts     | 114 ++++++++++++++++++++++++++++
+ 3 files changed, 217 insertions(+)
+ create mode 100644 lanternfall/src/input/GamepadMap.ts
+ create mode 100644 lanternfall/src/input/analog.ts
+ create mode 100644 lanternfall/tests/Input.test.ts
+
+diff --git a/lanternfall/src/input/GamepadMap.ts b/lanternfall/src/input/GamepadMap.ts
+new file mode 100644
+index 0000000..8915a20
+--- /dev/null
++++ b/lanternfall/src/input/GamepadMap.ts
+@@ -0,0 +1,73 @@
++import { radialDeadzone, responseCurve } from './analog';
++
++/** The parts of the browser Gamepad object we read (the "standard" layout). */
++export interface PadSnapshot {
++  axes: readonly number[];
++  buttons: readonly { pressed: boolean; value: number }[];
++}
++
++export interface PadState {
++  /** Left stick: +x is right, +z is FORWARD (stick pushed up). Length <= 1. */
++  moveX: number;
++  moveZ: number;
++  /** Right stick, -1..1, +x turns right and +y looks down. */
++  lookX: number;
++  lookY: number;
++  jump: boolean;
++  pulse: boolean;
++  restart: boolean;
++  pause: boolean;
++}
++
++export const NEUTRAL_PAD: Readonly<PadState> = {
++  moveX: 0, moveZ: 0, lookX: 0, lookY: 0, jump: false, pulse: false, restart: false, pause: false,
++};
++
++/** Standard-mapping button indices. */
++export const PAD_BUTTONS = { A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7, START: 9, DPAD_UP: 12 } as const;
++
++const held = (pad: PadSnapshot, i: number): boolean => {
++  const b = pad.buttons[i];
++  return !!b && (b.pressed || b.value > 0.5);
++};
++
++/**
++ * Turn one gamepad reading into game actions. A jumps, X or either trigger/bumper pulses the
++ * lantern, Y goes back to the checkpoint, Start pauses. Missing axes/buttons read as neutral
++ * so odd controllers cannot crash the game.
++ */
++export function readPad(pad: PadSnapshot | null): PadState {
++  if (!pad) return { ...NEUTRAL_PAD };
++  const axis = (i: number): number => (Number.isFinite(pad.axes[i]) ? pad.axes[i] : 0);
++  const move = radialDeadzone(axis(0), axis(1), 0.2);
++  const look = radialDeadzone(axis(2), axis(3), 0.15);
++  return {
++    moveX: move.x,
++    moveZ: 0 - move.y, // stick "up" is negative on the Y axis (0 - x avoids producing -0)
++    lookX: responseCurve(look.x),
++    lookY: responseCurve(look.y),
++    jump: held(pad, PAD_BUTTONS.A),
++    pulse: held(pad, PAD_BUTTONS.X) || held(pad, PAD_BUTTONS.RT) || held(pad, PAD_BUTTONS.RB),
++    restart: held(pad, PAD_BUTTONS.Y),
++    pause: held(pad, PAD_BUTTONS.START),
++  };
++}
++
++export type PadButton = 'jump' | 'pulse' | 'restart' | 'pause';
++const BUTTONS: readonly PadButton[] = ['jump', 'pulse', 'restart', 'pause'];
++
++/** Turns "held" into "went down this frame", like keyboard `pressed`. */
++export class PadEdges {
++  private previous: Record<PadButton, boolean> = { jump: false, pulse: false, restart: false, pause: false };
++
++  /** Returns the buttons that went down since the last call. */
++  update(state: PadState): PadButton[] {
++    const fresh = BUTTONS.filter((b) => state[b] && !this.previous[b]);
++    for (const b of BUTTONS) this.previous[b] = state[b];
++    return fresh;
++  }
++
++  reset(): void {
++    for (const b of BUTTONS) this.previous[b] = false;
++  }
++}
+diff --git a/lanternfall/src/input/analog.ts b/lanternfall/src/input/analog.ts
+new file mode 100644
+index 0000000..949a959
+--- /dev/null
++++ b/lanternfall/src/input/analog.ts
+@@ -0,0 +1,30 @@
++export interface Stick {
++  x: number;
++  y: number;
++}
++
++/**
++ * Radial deadzone for an analog stick. Inside `dead` the stick reads zero; outside it the
++ * remaining range is rescaled so the output still smoothly reaches length 1 (no sudden jump
++ * at the edge of the deadzone). Output length is always <= 1.
++ */
++export function radialDeadzone(x: number, y: number, dead = 0.2): Stick {
++  const len = Math.hypot(x, y);
++  if (!Number.isFinite(len) || len <= dead) return { x: 0, y: 0 };
++  const scaled = Math.min(1, (len - dead) / (1 - dead));
++  return { x: (x / len) * scaled, y: (y / len) * scaled };
++}
++
++/**
++ * Virtual (on-screen) stick: the finger is `dx, dy` pixels from the stick centre and the stick
++ * has `radius` pixels of travel. Returns a vector of length <= 1 after the deadzone.
++ */
++export function stickVector(dx: number, dy: number, radius: number, dead = 0.15): Stick {
++  if (radius <= 0) return { x: 0, y: 0 };
++  return radialDeadzone(dx / radius, dy / radius, dead);
++}
++
++/** Squash small stick movements for finer aiming: curve 1 is linear, 2 is quadratic. */
++export function responseCurve(v: number, curve = 1.6): number {
++  return Math.sign(v) * Math.abs(v) ** curve;
++}
+diff --git a/lanternfall/tests/Input.test.ts b/lanternfall/tests/Input.test.ts
+new file mode 100644
+index 0000000..87fccce
+--- /dev/null
++++ b/lanternfall/tests/Input.test.ts
+@@ -0,0 +1,114 @@
++import { describe, expect, it } from 'vitest';
++import { radialDeadzone, responseCurve, stickVector } from '../src/input/analog';
++import { NEUTRAL_PAD, PAD_BUTTONS, PadEdges, PadSnapshot, readPad } from '../src/input/GamepadMap';
++
++const pad = (axes: number[], pressed: number[] = []): PadSnapshot => ({
++  axes,
++  buttons: Array.from({ length: 16 }, (_, i) => ({ pressed: pressed.includes(i), value: pressed.includes(i) ? 1 : 0 })),
++});
++
++describe('radialDeadzone', () => {
++  it('reads zero inside the deadzone', () => {
++    expect(radialDeadzone(0.1, 0.1, 0.2)).toEqual({ x: 0, y: 0 });
++    expect(radialDeadzone(0, 0)).toEqual({ x: 0, y: 0 });
++  });
++
++  it('reaches full length at the rim and never exceeds 1', () => {
++    const full = radialDeadzone(1, 0);
++    expect(full.x).toBeCloseTo(1);
++    const over = radialDeadzone(3, 4);
++    expect(Math.hypot(over.x, over.y)).toBeCloseTo(1);
++  });
++
++  it('has no jump at the edge of the deadzone', () => {
++    const justOut = radialDeadzone(0.2001, 0, 0.2);
++    expect(justOut.x).toBeLessThan(0.01);
++  });
++
++  it('keeps the direction of the push', () => {
++    const v = radialDeadzone(0.6, -0.6);
++    expect(v.x).toBeGreaterThan(0);
++    expect(v.y).toBeLessThan(0);
++    expect(Math.abs(v.x + v.y)).toBeCloseTo(0);
++  });
++
++  it('treats NaN input as no input', () => {
++    expect(radialDeadzone(NaN, 1)).toEqual({ x: 0, y: 0 });
++  });
++});
++
++describe('stickVector and responseCurve', () => {
++  it('scales finger distance by the stick radius', () => {
++    const half = stickVector(30, 0, 60, 0);
++    expect(half.x).toBeCloseTo(0.5);
++    expect(stickVector(500, 0, 60).x).toBeCloseTo(1);
++  });
++
++  it('is safe with a zero radius', () => {
++    expect(stickVector(10, 10, 0)).toEqual({ x: 0, y: 0 });
++  });
++
++  it('the response curve keeps the sign and is gentler near zero', () => {
++    expect(responseCurve(-0.5)).toBeLessThan(0);
++    expect(Math.abs(responseCurve(0.5))).toBeLessThan(0.5);
++    expect(responseCurve(1)).toBeCloseTo(1);
++    expect(responseCurve(0)).toBe(0);
++  });
++});
++
++describe('readPad', () => {
++  it('is neutral with no pad connected', () => {
++    expect(readPad(null)).toEqual(NEUTRAL_PAD);
++  });
++
++  it('pushing the left stick up means forward', () => {
++    expect(readPad(pad([0, -1])).moveZ).toBeCloseTo(1);
++    expect(readPad(pad([1, 0])).moveX).toBeCloseTo(1);
++  });
++
++  it('ignores stick drift', () => {
++    const s = readPad(pad([0.08, -0.05, 0.1, 0.1]));
++    expect(s.moveX).toBe(0);
++    expect(s.moveZ).toBe(0);
++    expect(s.lookX).toBe(0);
++  });
++
++  it('maps buttons to actions', () => {
++    expect(readPad(pad([], [PAD_BUTTONS.A])).jump).toBe(true);
++    expect(readPad(pad([], [PAD_BUTTONS.X])).pulse).toBe(true);
++    expect(readPad(pad([], [PAD_BUTTONS.RT])).pulse).toBe(true);
++    expect(readPad(pad([], [PAD_BUTTONS.Y])).restart).toBe(true);
++    expect(readPad(pad([], [PAD_BUTTONS.START])).pause).toBe(true);
++    expect(readPad(pad([], [])).jump).toBe(false);
++  });
++
++  it('survives a controller with missing axes and buttons', () => {
++    const odd: PadSnapshot = { axes: [], buttons: [] };
++    expect(readPad(odd)).toEqual(NEUTRAL_PAD);
++  });
++});
++
++describe('PadEdges', () => {
++  it('reports a button once per press, not every frame', () => {
++    const e = new PadEdges();
++    const down = readPad(pad([], [PAD_BUTTONS.A]));
++    expect(e.update(down)).toEqual(['jump']);
++    expect(e.update(down)).toEqual([]);
++    expect(e.update(readPad(pad([])))).toEqual([]);
++    expect(e.update(down)).toEqual(['jump']);
++  });
++
++  it('reports several buttons pressed together', () => {
++    const e = new PadEdges();
++    const both = readPad(pad([], [PAD_BUTTONS.A, PAD_BUTTONS.X]));
++    expect(e.update(both).sort()).toEqual(['jump', 'pulse']);
++  });
++
++  it('reset forgets held buttons', () => {
++    const e = new PadEdges();
++    const down = readPad(pad([], [PAD_BUTTONS.A]));
++    e.update(down);
++    e.reset();
++    expect(e.update(down)).toEqual(['jump']);
++  });
++});
+-- 
+2.43.0
+

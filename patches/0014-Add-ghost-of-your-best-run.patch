@@ -1,0 +1,397 @@
+From d64b751a1e6f5be4370ee4aac54aeb584bad19a6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 11:01:52 +0000
+Subject: [PATCH 14/18] Add ghost of your best run
+
+Positions are sampled 10 times a second, stored in whole centimetres, and
+replayed as a translucent runner. Only full runs record or show a ghost,
+and a respawn makes the ghost snap rather than slide through the air.
+---
+ lanternfall/src/core/Game.ts    |  40 +++++++++-
+ lanternfall/src/core/Ghost.ts   | 115 +++++++++++++++++++++++++++
+ lanternfall/tests/Ghost.test.ts | 137 ++++++++++++++++++++++++++++++++
+ 3 files changed, 291 insertions(+), 1 deletion(-)
+ create mode 100644 lanternfall/src/core/Ghost.ts
+ create mode 100644 lanternfall/tests/Ghost.test.ts
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 195203f..9e30df4 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -17,6 +17,7 @@ import {
+ import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
+ import { EventBus } from './EventBus';
+ import { FallLog } from './FallLog';
++import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
+ import { HintEngine } from './Hints';
+ import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+@@ -63,6 +64,15 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private readonly hints = new HintEngine(browserStore());
++  private readonly ghostStore = new GhostStore(browserStore());
++  private readonly ghostRecorder = new GhostRecorder();
++  /** Best run so far, shown as a translucent runner. Null until a full run has been finished. */
++  private ghost: GhostTrack | null = this.ghostStore.load();
++  private ghostClock = 0;
++  private readonly ghostMesh = new THREE.Mesh(
++    new THREE.CapsuleGeometry(0.35, 1.1, 4, 12),
++    new THREE.MeshBasicMaterial({ color: 0x8fd3ff, transparent: true, opacity: 0.35, depthWrite: false }),
++  );
+   private readonly splits = new SplitBook(browserStore(), CHECKPOINTS.length);
+   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
+   private unsubscribeSettings: () => void = () => {};
+@@ -100,7 +110,8 @@ export class Game {
+     container.appendChild(this.renderer.domElement);
+ 
+     this.env = new Environment(this.scene);
+-    this.scene.add(this.env.group, this.level.group, this.player.group, this.player.auraMesh, this.sparkles.points);
++    this.ghostMesh.visible = false;
++    this.scene.add(this.env.group, this.level.group, this.player.group, this.player.auraMesh, this.sparkles.points, this.ghostMesh);
+ 
+     this.rig = new ThirdPersonCamera(this.camera, this.renderer.domElement);
+ 
+@@ -185,6 +196,8 @@ export class Game {
+ 
+   private begin(): void {
+     this.audio.unlock(); // browsers require a user click before audio can play
++    this.ghostRecorder.reset();
++    this.ghostClock = 0;
+     if (this.state.transition('playing')) {
+       this.hud.showTitle(false);
+       this.hud.showHud(true);
+@@ -212,6 +225,8 @@ export class Game {
+     this.stats = { time: 0, falls: 0, continued: false };
+     this.pulsesFired = 0;
+     this.fallsSinceCheckpoint = 0;
++    this.ghostRecorder.reset();
++    this.ghostClock = 0;
+     this.progress.clear();
+     this.refreshContinue();
+     this.moverTime = 0;
+@@ -256,6 +271,14 @@ export class Game {
+       const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
+       const { bestTime, fewestFalls } = out.record;
+       bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
++      if (out.record.bestTime === this.stats.time) {
++        const track = this.ghostRecorder.finish(this.player.body.pos);
++        if (track) {
++          this.ghostStore.save(track);
++          this.ghost = track;
++          bestLine += '  ·  Ghost saved';
++        }
++      }
+       if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
+       else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
+     }
+@@ -299,6 +322,7 @@ export class Game {
+     this.sparkles.update(dt);
+     this.env.update(target, this.elapsed);
+     this.rig.update(dt, target, [...this.level.solids(this.reveal), ...this.level.moverSolids(this.reveal, this.moverTime)]);
++    this.updateGhost();
+     this.hud.setPulse(this.lantern.charge, this.lantern.pulsing);
+ 
+     this.renderer.render(this.scene, this.camera);
+@@ -360,6 +384,8 @@ export class Game {
+       [...this.level.solids(this.reveal), ...movers],
+     );
+     this.jumpQueued = false;
++    this.ghostClock += dt;
++    if (!this.stats.continued) this.ghostRecorder.update(dt, body.pos);
+     if (ev.jumped) {
+       this.audio.jump();
+       this.player.kick(0.18); // stretch
+@@ -393,6 +419,16 @@ export class Game {
+     else if (body.pos.y < KILL_Y) this.respawn(true);
+   }
+ 
++  /** Show the best-run ghost only during full runs, and only if the player has not turned it off. */
++  private updateGhost(): void {
++    const show = this.state.phase === 'playing' && this.ghost !== null && !this.stats.continued && this.settings.get().showGhost;
++    this.ghostMesh.visible = show;
++    if (show && this.ghost) {
++      const g = sampleGhost(this.ghost, this.ghostClock);
++      this.ghostMesh.position.set(g.x, g.y, g.z);
++    }
++  }
++
+   private noteStanding(id: string | null, dt: number): void {
+     if (id === this.standingOn) this.standingFor += dt;
+     else {
+@@ -472,6 +508,8 @@ export class Game {
+     this.player.dispose();
+     this.level.dispose();
+     this.env.dispose();
++    this.ghostMesh.geometry.dispose();
++    (this.ghostMesh.material as THREE.Material).dispose();
+     this.events.clear();
+     this.renderer.dispose();
+     this.renderer.domElement.remove();
+diff --git a/lanternfall/src/core/Ghost.ts b/lanternfall/src/core/Ghost.ts
+new file mode 100644
+index 0000000..2a5f2b4
+--- /dev/null
++++ b/lanternfall/src/core/Ghost.ts
+@@ -0,0 +1,115 @@
++import { Vec3 } from '../physics/aabb';
++import { KeyValueStore, readJson } from './storage';
++
++/** Seconds between two recorded positions. */
++export const GHOST_INTERVAL = 0.1;
++/** Most positions we keep (10 minutes of play). Longer runs get no ghost. */
++export const GHOST_MAX_POINTS = 6000;
++/** A jump bigger than this (metres) between two samples is a respawn: the ghost snaps instead of sliding through the air. */
++export const GHOST_SNAP_DISTANCE = 5;
++
++/** A recorded run: positions sampled at a fixed interval. */
++export interface GhostTrack {
++  interval: number;
++  /** Flat [x, y, z, x, y, z, ...] in whole centimetres, which keeps the saved file small. */
++  points: number[];
++}
++
++const toCm = (metres: number): number => Math.round(metres * 100);
++
++export function pointCount(track: GhostTrack): number {
++  return Math.floor(track.points.length / 3);
++}
++
++/** Length of the recorded run in seconds. */
++export function ghostDuration(track: GhostTrack): number {
++  return Math.max(0, pointCount(track) - 1) * track.interval;
++}
++
++/** Records the player's position at a steady rate while a run is in progress. */
++export class GhostRecorder {
++  private points: number[] = [];
++  private clock = 0;
++  private nextAt = 0;
++  private overflowed = false;
++
++  /** Start a new recording. */
++  reset(): void {
++    this.points = [];
++    this.clock = 0;
++    this.nextAt = 0;
++    this.overflowed = false;
++  }
++
++  get sampleCount(): number {
++    return Math.floor(this.points.length / 3);
++  }
++
++  /** Advance by `dt` seconds of run time; stores a sample whenever one is due. */
++  update(dt: number, pos: Vec3): void {
++    this.clock += dt;
++    while (this.clock >= this.nextAt) {
++      this.push(pos);
++      this.nextAt += GHOST_INTERVAL;
++    }
++  }
++
++  /** Finish the run at `end`. Null if the run was too short or too long to keep. */
++  finish(end: Vec3): GhostTrack | null {
++    this.push(end);
++    if (this.overflowed || this.sampleCount < 2) return null;
++    return { interval: GHOST_INTERVAL, points: [...this.points] };
++  }
++
++  private push(pos: Vec3): void {
++    if (this.sampleCount >= GHOST_MAX_POINTS) {
++      this.overflowed = true;
++      return;
++    }
++    this.points.push(toCm(pos.x), toCm(pos.y), toCm(pos.z));
++  }
++}
++
++/** Accept a saved track only if it is well formed; anything else (old saves, edited JSON) becomes null. */
++export function sanitizeGhost(raw: unknown): GhostTrack | null {
++  if (typeof raw !== 'object' || raw === null) return null;
++  const { interval, points } = raw as Partial<GhostTrack>;
++  if (typeof interval !== 'number' || !Number.isFinite(interval) || interval < 0.01 || interval > 1) return null;
++  if (!Array.isArray(points) || points.length < 6 || points.length % 3 !== 0) return null;
++  if (points.length > GHOST_MAX_POINTS * 3) return null;
++  if (!points.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
++  return { interval, points: points.slice() };
++}
++
++function pointAt(track: GhostTrack, i: number): Vec3 {
++  return { x: track.points[3 * i] / 100, y: track.points[3 * i + 1] / 100, z: track.points[3 * i + 2] / 100 };
++}
++
++/** Where the ghost is `t` seconds into its run. Before the start it waits; after the end it stays at the finish. */
++export function sampleGhost(track: GhostTrack, t: number): Vec3 {
++  const n = pointCount(track);
++  const f = Math.max(0, t) / track.interval;
++  const i = Math.floor(f);
++  if (i >= n - 1) return pointAt(track, n - 1);
++  const a = pointAt(track, i);
++  const b = pointAt(track, i + 1);
++  if (Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) > GHOST_SNAP_DISTANCE) return a;
++  const k = f - i;
++  return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: a.z + (b.z - a.z) * k };
++}
++
++/** Saves the ghost of the player's best run. */
++export class GhostStore {
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly key = 'lanternfall.ghost',
++  ) {}
++
++  load(): GhostTrack | null {
++    return sanitizeGhost(readJson(this.store, this.key));
++  }
++
++  save(track: GhostTrack): void {
++    this.store.setItem(this.key, JSON.stringify(track));
++  }
++}
+diff --git a/lanternfall/tests/Ghost.test.ts b/lanternfall/tests/Ghost.test.ts
+new file mode 100644
+index 0000000..f498bee
+--- /dev/null
++++ b/lanternfall/tests/Ghost.test.ts
+@@ -0,0 +1,137 @@
++import { describe, expect, it } from 'vitest';
++import {
++  GHOST_INTERVAL, GHOST_MAX_POINTS, GHOST_SNAP_DISTANCE, GhostRecorder, GhostStore, GhostTrack,
++  ghostDuration, pointCount, sampleGhost, sanitizeGhost,
++} from '../src/core/Ghost';
++import { MemoryStore } from '../src/core/storage';
++
++const STEP = 1 / 60;
++const at = (x: number, y = 0, z = 0) => ({ x, y, z });
++
++/** A straight 1 m/s walk along +x with `n` samples. */
++function walk(n: number): GhostTrack {
++  const points: number[] = [];
++  for (let i = 0; i < n; i++) points.push(Math.round(i * GHOST_INTERVAL * 100), 0, 0);
++  return { interval: GHOST_INTERVAL, points };
++}
++
++describe('GhostRecorder', () => {
++  it('takes a first sample immediately', () => {
++    const r = new GhostRecorder();
++    r.update(STEP, at(1, 2, 3));
++    expect(r.sampleCount).toBe(1);
++  });
++
++  it('samples about ten times per second at 60 Hz', () => {
++    const r = new GhostRecorder();
++    for (let i = 0; i < 60; i++) r.update(STEP, at(i));
++    expect(r.sampleCount).toBeGreaterThanOrEqual(10);
++    expect(r.sampleCount).toBeLessThanOrEqual(11);
++  });
++
++  it('stores whole centimetres', () => {
++    const r = new GhostRecorder();
++    r.update(STEP, at(1.2349, 0.5, -2.004));
++    const track = r.finish(at(0, 0, 0));
++    expect(track?.points.slice(0, 3)).toEqual([123, 50, -200]);
++  });
++
++  it('finish keeps the end position as the last sample', () => {
++    const r = new GhostRecorder();
++    r.update(STEP, at(0));
++    const track = r.finish(at(7, 1, 2));
++    expect(track?.points.slice(-3)).toEqual([700, 100, 200]);
++  });
++
++  it('refuses a run with fewer than two samples', () => {
++    const r = new GhostRecorder();
++    expect(r.finish(at(0))).toBeNull();
++  });
++
++  it('reset clears a previous recording', () => {
++    const r = new GhostRecorder();
++    for (let i = 0; i < 30; i++) r.update(STEP, at(i));
++    r.reset();
++    expect(r.sampleCount).toBe(0);
++    r.update(STEP, at(5));
++    expect(r.sampleCount).toBe(1);
++  });
++
++  it('gives up on runs that are too long instead of growing forever', () => {
++    const r = new GhostRecorder();
++    for (let i = 0; i < GHOST_MAX_POINTS + 50; i++) r.update(GHOST_INTERVAL, at(i));
++    expect(r.sampleCount).toBe(GHOST_MAX_POINTS);
++    expect(r.finish(at(0))).toBeNull();
++  });
++});
++
++describe('sanitizeGhost', () => {
++  it('accepts a good track', () => {
++    expect(sanitizeGhost(walk(5))).toEqual(walk(5));
++  });
++
++  it('rejects bad shapes', () => {
++    const bad: unknown[] = [
++      null, 3, 'x', [], {}, { interval: 0.1 }, { points: [1, 2, 3, 4, 5, 6] },
++      { interval: 0.1, points: [1, 2, 3] },
++      { interval: 0.1, points: [1, 2, 3, 4, 5] },
++      { interval: 0.1, points: [1, 2, 3, 4, 5, 'x'] },
++      { interval: 0.1, points: [1, 2, 3, 4, 5, NaN] },
++      { interval: 0, points: [1, 2, 3, 4, 5, 6] },
++      { interval: 99, points: [1, 2, 3, 4, 5, 6] },
++      { interval: 0.1, points: new Array((GHOST_MAX_POINTS + 1) * 3).fill(0) },
++    ];
++    for (const b of bad) expect(sanitizeGhost(b)).toBeNull();
++  });
++
++  it('returns a copy, not the saved array', () => {
++    const raw = walk(4);
++    const out = sanitizeGhost(raw) as GhostTrack;
++    out.points[0] = 999;
++    expect(raw.points[0]).toBe(0);
++  });
++});
++
++describe('sampleGhost', () => {
++  it('reports counts and duration', () => {
++    expect(pointCount(walk(11))).toBe(11);
++    expect(ghostDuration(walk(11))).toBeCloseTo(1);
++  });
++
++  it('interpolates between samples', () => {
++    const p = sampleGhost(walk(11), 0.25);
++    expect(p.x).toBeCloseTo(0.25, 2);
++  });
++
++  it('waits at the start for negative time', () => {
++    expect(sampleGhost(walk(11), -5).x).toBe(0);
++  });
++
++  it('stays at the finish after the run ends', () => {
++    expect(sampleGhost(walk(11), 99).x).toBeCloseTo(1, 2);
++  });
++
++  it('snaps across a respawn instead of flying through the air', () => {
++    const jump = (GHOST_SNAP_DISTANCE + 10) * 100;
++    const track: GhostTrack = { interval: GHOST_INTERVAL, points: [0, 0, 0, jump, 0, 0, jump + 10, 0, 0] };
++    expect(sampleGhost(track, 0.05).x).toBe(0);
++    expect(sampleGhost(track, 0.1).x).toBeCloseTo(jump / 100, 2);
++  });
++});
++
++describe('GhostStore', () => {
++  it('starts empty, saves and reloads', () => {
++    const mem = new MemoryStore();
++    expect(new GhostStore(mem).load()).toBeNull();
++    new GhostStore(mem).save(walk(6));
++    expect(new GhostStore(mem).load()).toEqual(walk(6));
++  });
++
++  it('treats corrupt or invalid saved data as no ghost', () => {
++    const mem = new MemoryStore();
++    mem.setItem('lanternfall.ghost', '{broken');
++    expect(new GhostStore(mem).load()).toBeNull();
++    mem.setItem('lanternfall.ghost', JSON.stringify({ interval: 0.1, points: [1] }));
++    expect(new GhostStore(mem).load()).toBeNull();
++  });
++});
+-- 
+2.43.0
+

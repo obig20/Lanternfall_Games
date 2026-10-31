@@ -1,0 +1,290 @@
+From 20214809fd9b716ca4586dfa1bbe7155955151cc Mon Sep 17 00:00:00 2001
+From: obig20 <obig20@example.com>
+Date: Fri, 30 Oct 2026 18:30:25 +0000
+Subject: [PATCH 05/18] Add gamepad and touch controls to the game
+
+Input.pollPad feeds pad buttons through the same key codes as the keyboard.
+TouchControls adds an on-screen stick, Jump, Pulse and Pause (only on touch devices).
+Keyboard, pad and touch movement add together. Removes the 'no gamepad/touch' limitation.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ lanternfall/index.html                 |  12 ++-
+ lanternfall/src/core/Game.ts           |  19 ++++-
+ lanternfall/src/input/Input.ts         |  21 ++++-
+ lanternfall/src/input/TouchControls.ts | 109 +++++++++++++++++++++++++
+ lanternfall/src/ui/Hud.ts              |   2 +
+ 5 files changed, 158 insertions(+), 5 deletions(-)
+ create mode 100644 lanternfall/src/input/TouchControls.ts
+
+diff --git a/lanternfall/index.html b/lanternfall/index.html
+index d0cb804..7bbbf8f 100644
+--- a/lanternfall/index.html
++++ b/lanternfall/index.html
+@@ -7,7 +7,7 @@
+     <style>
+       html, body { margin: 0; height: 100%; overflow: hidden; background: #0e0a3a; }
+       #app { position: fixed; inset: 0; }
+-      #app canvas { display: block; cursor: grab; }
++      #app canvas { display: block; cursor: grab; touch-action: none; }
+ 
+       .hud-root { position: absolute; inset: 0; pointer-events: none; font-family: system-ui, "Segoe UI", sans-serif; color: #f4efff; }
+       .hud-root .hidden { display: none !important; }
+@@ -44,6 +44,16 @@
+       .settings input[type=range] { width: 180px; accent-color: #ffd36b; }
+       .settings .check { justify-content: flex-start; gap: 8px; }
+       .best { margin: 4px 0 0; color: #ffd36b; font-size: 14px; min-height: 1.2em; }
++      .touch-controls { position: absolute; inset: 0; pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
++      .touch-controls.hidden { display: none; }
++      .t-stick { position: absolute; left: 28px; bottom: 28px; width: 128px; height: 128px; border-radius: 50%; pointer-events: auto; touch-action: none;
++                 background: rgba(24,16,70,.45); border: 2px solid rgba(255,211,107,.45); display: flex; align-items: center; justify-content: center; }
++      .t-knob { width: 56px; height: 56px; border-radius: 50%; background: rgba(255,211,107,.7); box-shadow: 0 0 16px rgba(255,211,107,.5); }
++      .touch-controls .t-btn { position: absolute; pointer-events: auto; touch-action: none; margin: 0; padding: 0; width: 84px; height: 84px; border-radius: 50%; font-size: 14px; letter-spacing: .04em;
++                                background: rgba(255,211,107,.75); }
++      .t-jump { right: 28px; bottom: 28px; }
++      .t-pulse { right: 128px; bottom: 60px; width: 68px !important; height: 68px !important; }
++      .t-pause { right: 16px; top: 16px; width: 44px !important; height: 44px !important; font-size: 16px !important; }
+       .flash { position: absolute; inset: 0; background: #0e0a3a; opacity: 0; transition: opacity .25s; }
+       .flash.on { opacity: .85; transition: none; }
+     </style>
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 273971c..c793fba 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -2,6 +2,7 @@ import * as THREE from 'three';
+ import { Synth } from '../audio/Synth';
+ import { Sparkles } from '../fx/Sparkles';
+ import { Input } from '../input/Input';
++import { TouchControls } from '../input/TouchControls';
+ import { CharacterModel } from '../player/CharacterModel';
+ import { Player } from '../player/Player';
+ import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
+@@ -57,6 +58,7 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private unsubscribeSettings: () => void = () => {};
++  private readonly touch: TouchControls | null;
+ 
+   private respawnPoint: { x: number; y: number; z: number } = { ...SPAWN };
+   private activeCheckpoint: string | null = null;
+@@ -87,6 +89,7 @@ export class Game {
+     this.rig = new ThirdPersonCamera(this.camera, this.renderer.domElement);
+ 
+     this.hud = new Hud(container);
++    this.touch = TouchControls.isSupported() ? new TouchControls(container, () => this.togglePause()) : null;
+     this.hud.onStart = () => this.begin();
+     this.hud.onResume = () => this.togglePause();
+     this.hud.onRestart = () => this.restart();
+@@ -199,13 +202,18 @@ export class Game {
+     this.lastTime = t;
+     this.elapsed += dt;
+ 
++    this.input.pollPad();
+     this.handleKeys();
++    this.touch?.setVisible(this.state.phase === 'playing');
+ 
+     if (this.state.phase === 'playing') {
+       if (this.input.down('ArrowLeft')) this.rig.rotate(-1.8 * dt);
+       if (this.input.down('ArrowRight')) this.rig.rotate(1.8 * dt);
+       if (this.input.pressed('Space')) this.jumpQueued = true;
+-      if (this.input.pressed('KeyQ')) this.pulseQueued = true;
++      if (this.input.pressed('KeyQ') || this.touch?.consumePulse()) this.pulseQueued = true;
++      if (this.touch?.consumeJump()) this.jumpQueued = true;
++      const pad = this.input.pad;
++      if (pad.lookX !== 0 || pad.lookY !== 0) this.rig.look(pad.lookX * 500 * dt, pad.lookY * 350 * dt);
+ 
+       this.accumulator += dt;
+       while (this.accumulator >= STEP) {
+@@ -265,8 +273,12 @@ export class Game {
+     // 3. Movement relative to the camera
+     const f = this.rig.forward();
+     const r = this.rig.right();
+-    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0);
+-    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0);
++    // Keyboard, gamepad stick and touch stick all add up; the body caps the total at length 1.
++    const pad = this.input.pad;
++    const tx = this.touch?.moveX ?? 0;
++    const tz = this.touch?.moveZ ?? 0;
++    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
++    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
+     const ev = body.step(
+       dt,
+       { moveX: r.x * ix + f.x * iz, moveZ: r.z * ix + f.z * iz, jumpPressed: this.jumpQueued },
+@@ -344,6 +356,7 @@ export class Game {
+     this.input.dispose();
+     this.audio.dispose();
+     this.unsubscribeSettings();
++    this.touch?.dispose();
+     this.hud.dispose();
+     this.sparkles.dispose();
+     this.player.dispose();
+diff --git a/lanternfall/src/input/Input.ts b/lanternfall/src/input/Input.ts
+index 5592c44..2f6b956 100644
+--- a/lanternfall/src/input/Input.ts
++++ b/lanternfall/src/input/Input.ts
+@@ -1,7 +1,14 @@
+-/** Keyboard state. `down` = held; `pressed` = went down this frame. */
++import { NEUTRAL_PAD, PadEdges, PadState, readPad } from './GamepadMap';
++
++const PAD_KEYS = { jump: 'Space', pulse: 'KeyQ', restart: 'KeyR', pause: 'Escape' } as const;
++
++/** Keyboard and gamepad state. `down` = held; `pressed` = went down this frame. */
+ export class Input {
+   private held = new Set<string>();
+   private justDown = new Set<string>();
++  /** Latest gamepad reading (neutral when no pad is connected). */
++  pad: PadState = { ...NEUTRAL_PAD };
++  private readonly padEdges = new PadEdges();
+   private static readonly BLOCKED = new Set(['Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+ 
+   constructor() {
+@@ -18,6 +25,18 @@ export class Input {
+     return this.justDown.has(code);
+   }
+ 
++  /**
++   * Read the first connected gamepad. Call once per frame before reading input.
++   * Pad buttons are turned into the same key codes the keyboard uses, so game code
++   * only has to ask `pressed('Space')` once.
++   */
++  pollPad(): void {
++    const list = typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function' ? navigator.getGamepads() : [];
++    const connected = Array.from(list).find((p) => p && p.connected) ?? null;
++    this.pad = readPad(connected);
++    for (const button of this.padEdges.update(this.pad)) this.justDown.add(PAD_KEYS[button]);
++  }
++
+   /** Call once at the end of every frame. */
+   endFrame(): void {
+     this.justDown.clear();
+diff --git a/lanternfall/src/input/TouchControls.ts b/lanternfall/src/input/TouchControls.ts
+new file mode 100644
+index 0000000..baa22a2
+--- /dev/null
++++ b/lanternfall/src/input/TouchControls.ts
+@@ -0,0 +1,109 @@
++import { stickVector } from './analog';
++
++const STICK_RADIUS = 56; // pixels of finger travel for a full push
++
++/**
++ * On-screen controls for phones and tablets: a move stick (bottom-left), Jump and Pulse buttons
++ * (bottom-right) and a pause button. Dragging anywhere else still turns the camera, because the
++ * camera listens to the canvas directly.
++ */
++export class TouchControls {
++  /** Current stick vector, +z is forward. Length <= 1. */
++  moveX = 0;
++  moveZ = 0;
++
++  private jumpQueued = false;
++  private pulseQueued = false;
++  private stickId: number | null = null;
++  private readonly root = document.createElement('div');
++  private readonly base: HTMLElement;
++  private readonly knob: HTMLElement;
++  private readonly cleanups: Array<() => void> = [];
++
++  /** True on devices with a touch screen. */
++  static isSupported(): boolean {
++    return typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
++  }
++
++  constructor(parent: HTMLElement, onPause: () => void) {
++    this.root.className = 'touch-controls hidden';
++    this.root.innerHTML = `
++      <div class="t-stick"><div class="t-knob"></div></div>
++      <button class="t-btn t-jump" type="button">JUMP</button>
++      <button class="t-btn t-pulse" type="button">PULSE</button>
++      <button class="t-btn t-pause" type="button">II</button>
++    `;
++    parent.appendChild(this.root);
++    this.base = this.root.querySelector('.t-stick') as HTMLElement;
++    this.knob = this.root.querySelector('.t-knob') as HTMLElement;
++
++    this.listen(this.base, 'pointerdown', this.onStickDown as EventListener);
++    this.listen(this.base, 'pointermove', this.onStickMove as EventListener);
++    this.listen(this.base, 'pointerup', this.onStickEnd as EventListener);
++    this.listen(this.base, 'pointercancel', this.onStickEnd as EventListener);
++    this.listen(this.root.querySelector('.t-jump') as HTMLElement, 'pointerdown', () => { this.jumpQueued = true; });
++    this.listen(this.root.querySelector('.t-pulse') as HTMLElement, 'pointerdown', () => { this.pulseQueued = true; });
++    this.listen(this.root.querySelector('.t-pause') as HTMLElement, 'pointerdown', () => onPause());
++  }
++
++  setVisible(on: boolean): void {
++    this.root.classList.toggle('hidden', !on);
++    if (!on) this.release();
++  }
++
++  /** True once per jump-button press. */
++  consumeJump(): boolean {
++    const v = this.jumpQueued;
++    this.jumpQueued = false;
++    return v;
++  }
++
++  /** True once per pulse-button press. */
++  consumePulse(): boolean {
++    const v = this.pulseQueued;
++    this.pulseQueued = false;
++    return v;
++  }
++
++  private listen(el: HTMLElement, type: string, fn: EventListener): void {
++    el.addEventListener(type, fn);
++    this.cleanups.push(() => el.removeEventListener(type, fn));
++  }
++
++  private onStickDown = (e: PointerEvent): void => {
++    if (this.stickId !== null) return;
++    this.stickId = e.pointerId;
++    this.base.setPointerCapture(e.pointerId);
++    this.updateStick(e);
++  };
++
++  private onStickMove = (e: PointerEvent): void => {
++    if (e.pointerId === this.stickId) this.updateStick(e);
++  };
++
++  private onStickEnd = (e: PointerEvent): void => {
++    if (e.pointerId === this.stickId) this.release();
++  };
++
++  private updateStick(e: PointerEvent): void {
++    const r = this.base.getBoundingClientRect();
++    const dx = e.clientX - (r.left + r.width / 2);
++    const dy = e.clientY - (r.top + r.height / 2);
++    const v = stickVector(dx, dy, STICK_RADIUS);
++    this.moveX = v.x;
++    this.moveZ = 0 - v.y; // finger up = forward
++    this.knob.style.transform = `translate(${Math.max(-1, Math.min(1, dx / STICK_RADIUS)) * 36}px, ${Math.max(-1, Math.min(1, dy / STICK_RADIUS)) * 36}px)`;
++  }
++
++  private release(): void {
++    this.stickId = null;
++    this.moveX = 0;
++    this.moveZ = 0;
++    this.knob.style.transform = 'translate(0, 0)';
++  }
++
++  dispose(): void {
++    for (const off of this.cleanups) off();
++    this.root.remove();
++  }
++}
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index 8d04215..44737c4 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -24,6 +24,8 @@ export class Hud {
+             <li><b>Space</b> jump</li>
+             <li><b>Q</b> lantern pulse (reveals far platforms)</li>
+             <li><b>Drag mouse</b> or <b>← →</b> turn camera</li>
++            <li><b>Gamepad</b> left stick move &middot; A jump &middot; X pulse &middot; right stick camera</li>
++            <li><b>Touch</b> on-screen stick and buttons</li>
+             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
+           </ul>
+           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
+-- 
+2.43.0
+

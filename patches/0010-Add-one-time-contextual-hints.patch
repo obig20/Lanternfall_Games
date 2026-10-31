@@ -1,0 +1,344 @@
+From 993282bd433f4b240060af4acc9802a0beebc176 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 10:51:10 +0000
+Subject: [PATCH 10/18] Add one-time contextual hints
+
+HintEngine shows each tip once (remembered between sessions) with a
+cooldown. Tips cover the pulse, the beacon crystal, drifting stones, the
+lift, the camera, and a 'stuck' tip after three falls at one checkpoint.
+---
+ lanternfall/src/core/Game.ts    |  39 +++++++++++-
+ lanternfall/src/core/Hints.ts   | 106 ++++++++++++++++++++++++++++++++
+ lanternfall/tests/Hints.test.ts |  92 +++++++++++++++++++++++++++
+ 3 files changed, 236 insertions(+), 1 deletion(-)
+ create mode 100644 lanternfall/src/core/Hints.ts
+ create mode 100644 lanternfall/tests/Hints.test.ts
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 2576c61..fbfa2e0 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -17,6 +17,7 @@ import {
+ import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
+ import { EventBus } from './EventBus';
+ import { FallLog } from './FallLog';
++import { HintEngine } from './Hints';
+ import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+ import { SettingsStore } from './Settings';
+@@ -60,6 +61,7 @@ export class Game {
+   private readonly resizeObserver: ResizeObserver;
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
++  private readonly hints = new HintEngine(browserStore());
+   private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
+   private unsubscribeSettings: () => void = () => {};
+   private readonly touch: TouchControls | null;
+@@ -78,6 +80,11 @@ export class Game {
+   private readonly beaconsActive = new Set<string>();
+   private readonly fallLog = new FallLog();
+   private lastPlatform: string | null = null;
++  /** For tips: what the player stands on now, for how long, and how often they struggled. */
++  private standingOn: string | null = null;
++  private standingFor = 0;
++  private pulsesFired = 0;
++  private fallsSinceCheckpoint = 0;
+   private stepTimer = 0;
+   private disposed = false;
+ 
+@@ -157,6 +164,8 @@ export class Game {
+     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
+     this.applyCheckpointObjective(c.id);
+     this.stats = { time: 0, falls: 0, continued: true };
++    this.pulsesFired = 0;
++    this.fallsSinceCheckpoint = 0;
+     this.placePlayer();
+     this.begin();
+   }
+@@ -198,6 +207,8 @@ export class Game {
+     this.hud.setObjective(OBJ_START);
+     this.hud.setCheckpoint('start');
+     this.stats = { time: 0, falls: 0, continued: false };
++    this.pulsesFired = 0;
++    this.fallsSinceCheckpoint = 0;
+     this.progress.clear();
+     this.refreshContinue();
+     this.moverTime = 0;
+@@ -220,6 +231,7 @@ export class Game {
+   private respawn(fell: boolean): void {
+     if (fell) {
+       this.stats.falls++;
++      this.fallsSinceCheckpoint++;
+       this.fallLog.record(this.lastPlatform);
+     }
+     this.placePlayer();
+@@ -307,6 +319,7 @@ export class Game {
+       this.pulseQueued = false;
+       const lp = this.player.lanternPos;
+       if (this.lantern.tryPulse()) {
++        this.pulsesFired++;
+         this.audio.pulse();
+         this.sparkles.ring(lp.x, lp.y, lp.z, 60, GOLD, 9);
+         for (const b of BEACONS) if (!this.beaconsActive.has(b.id) && pulseReaches(b, lp)) this.activateBeacon(b);
+@@ -357,13 +370,18 @@ export class Game {
+     // Remember the last platform we stood on (for the "toughest jump" stat) and play footsteps.
+     if (body.grounded) {
+       const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
+-      this.lastPlatform = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime) ?? this.lastPlatform;
++      const under = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime);
++      this.lastPlatform = under ?? this.lastPlatform;
++      this.noteStanding(under, dt);
+       this.stepTimer -= dt;
+       if (this.stepTimer <= 0 && Math.hypot(body.vel.x, body.vel.z) > 2) {
+         this.audio.step();
+         this.stepTimer = 0.3;
+       }
++    } else {
++      this.noteStanding(null, dt);
+     }
++    this.showHint(dt);
+ 
+     // 4. Checkpoints, goal, falling
+     const feetNow = { x: body.pos.x, y: body.feetY, z: body.pos.z };
+@@ -372,9 +390,28 @@ export class Game {
+     else if (body.pos.y < KILL_Y) this.respawn(true);
+   }
+ 
++  private noteStanding(id: string | null, dt: number): void {
++    if (id === this.standingOn) this.standingFor += dt;
++    else {
++      this.standingOn = id;
++      this.standingFor = 0;
++    }
++  }
++
++  private showHint(dt: number): void {
++    const hint = this.hints.update(dt, {
++      platformId: this.standingOn,
++      pulsesFired: this.pulsesFired,
++      fallsSinceCheckpoint: this.fallsSinceCheckpoint,
++      secondsOnPlatform: this.standingFor,
++    });
++    if (hint) this.hud.toast(hint.text, 6);
++  }
++
+   private tryCheckpoint(c: TriggerDef, index: number, feet: { x: number; y: number; z: number }): void {
+     if (this.activeCheckpoint === c.id || !inTrigger(feet, c)) return;
+     this.activeCheckpoint = c.id;
++    this.fallsSinceCheckpoint = 0;
+     this.respawnPoint = respawnPosition(c);
+     this.level.setActiveCheckpoint(c.id);
+     this.audio.checkpoint();
+diff --git a/lanternfall/src/core/Hints.ts b/lanternfall/src/core/Hints.ts
+new file mode 100644
+index 0000000..769d39d
+--- /dev/null
++++ b/lanternfall/src/core/Hints.ts
+@@ -0,0 +1,106 @@
++import { KeyValueStore, readJson } from './storage';
++
++/** What the hint system needs to know about the player right now. */
++export interface HintContext {
++  /** Id of the platform or mover the player is standing on, or null in mid-air. */
++  platformId: string | null;
++  /** How many lantern pulses the player has fired this run. */
++  pulsesFired: number;
++  /** Falls since the last checkpoint was reached. */
++  fallsSinceCheckpoint: number;
++  /** Seconds the player has stood on the current platform. */
++  secondsOnPlatform: number;
++}
++
++export interface HintDef {
++  id: string;
++  text: string;
++  /** True when the hint would help right now. A hint is only ever shown once. */
++  when: (c: HintContext) => boolean;
++}
++
++/** Short tips that teach the rules the first time they matter. Order = priority when several match. */
++export const HINTS: readonly HintDef[] = [
++  {
++    id: 'stuck',
++    text: 'Stuck? Press Q before a leap: the pulse reveals stones your lantern cannot reach.',
++    when: (c) => c.fallsSinceCheckpoint >= 3,
++  },
++  {
++    id: 'camera',
++    text: 'Drag the mouse (or use the arrow keys) to turn the camera.',
++    when: (c) => c.platformId === 'S' && c.secondsOnPlatform >= 12,
++  },
++  {
++    id: 'pulse',
++    text: 'Gap too wide to see across? Press Q to pulse and reveal the stones beyond.',
++    when: (c) => (c.platformId === 'H2' || c.platformId === 'C1') && c.secondsOnPlatform >= 1.5 && c.pulsesFired === 0,
++  },
++  {
++    id: 'beacon',
++    text: 'A dormant crystal waits on the side ledge. Pulse close to it to wake it.',
++    when: (c) => c.platformId === 'R2a' && c.secondsOnPlatform >= 1.5,
++  },
++  {
++    id: 'drift',
++    text: 'These stones drift back and forth. Wait for one to reach you, then jump. The dark one needs your light.',
++    when: (c) => c.platformId === 'G2' && c.secondsOnPlatform >= 1.5,
++  },
++  {
++    id: 'lift',
++    text: 'The lift only reaches the gate at the top of its ride. Time your jump.',
++    when: (c) => c.platformId === 'R3a' && c.secondsOnPlatform >= 1.5,
++  },
++];
++
++export interface HintOptions {
++  /** Minimum seconds between two hints, so tips never stack up. */
++  cooldown?: number;
++  key?: string;
++}
++
++/**
++ * Decides when to show a tip. Each tip is shown once ever (remembered between sessions),
++ * and never sooner than `cooldown` seconds after the previous one.
++ */
++export class HintEngine {
++  private readonly seen: Set<string>;
++  private readonly cooldown: number;
++  private readonly key: string;
++  private sinceLast: number;
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly hints: readonly HintDef[] = HINTS,
++    options: HintOptions = {},
++  ) {
++    this.cooldown = options.cooldown ?? 8;
++    this.key = options.key ?? 'lanternfall.hints';
++    this.seen = new Set(HintEngine.sanitize(readJson(store, this.key)));
++    this.sinceLast = this.cooldown; // the first hint may show immediately
++  }
++
++  /** Keep only string ids from whatever was stored. */
++  static sanitize(raw: unknown): string[] {
++    if (!Array.isArray(raw)) return [];
++    return raw.filter((v): v is string => typeof v === 'string');
++  }
++
++  hasSeen(id: string): boolean {
++    return this.seen.has(id);
++  }
++
++  /** Advance the clock by `dt` seconds. Returns a hint to show now, or null. */
++  update(dt: number, ctx: HintContext): HintDef | null {
++    this.sinceLast += dt;
++    if (this.sinceLast < this.cooldown) return null;
++    for (const h of this.hints) {
++      if (this.seen.has(h.id) || !h.when(ctx)) continue;
++      this.seen.add(h.id);
++      this.sinceLast = 0;
++      this.store.setItem(this.key, JSON.stringify([...this.seen]));
++      return h;
++    }
++    return null;
++  }
++}
+diff --git a/lanternfall/tests/Hints.test.ts b/lanternfall/tests/Hints.test.ts
+new file mode 100644
+index 0000000..1b25838
+--- /dev/null
++++ b/lanternfall/tests/Hints.test.ts
+@@ -0,0 +1,92 @@
++import { describe, expect, it } from 'vitest';
++import { HINTS, HintContext, HintDef, HintEngine } from '../src/core/Hints';
++import { MemoryStore } from '../src/core/storage';
++
++const base: HintContext = { platformId: null, pulsesFired: 0, fallsSinceCheckpoint: 0, secondsOnPlatform: 0 };
++const ctx = (patch: Partial<HintContext>): HintContext => ({ ...base, ...patch });
++
++describe('HINTS data', () => {
++  it('has unique ids and non-empty text', () => {
++    const ids = HINTS.map((h) => h.id);
++    expect(new Set(ids).size).toBe(ids.length);
++    for (const h of HINTS) expect(h.text.length).toBeGreaterThan(10);
++  });
++
++  it('shows nothing while the player is simply in mid-air at the start', () => {
++    for (const h of HINTS) expect(h.when(base)).toBe(false);
++  });
++
++  it('the pulse tip stops once the player has pulsed', () => {
++    const pulse = HINTS.find((h) => h.id === 'pulse') as HintDef;
++    expect(pulse.when(ctx({ platformId: 'H2', secondsOnPlatform: 2, pulsesFired: 0 }))).toBe(true);
++    expect(pulse.when(ctx({ platformId: 'H2', secondsOnPlatform: 2, pulsesFired: 1 }))).toBe(false);
++  });
++
++  it('every platform-based tip waits a moment before appearing', () => {
++    for (const id of ['H2', 'C1', 'R2a', 'G2', 'R3a']) {
++      const early = HINTS.filter((h) => h.when(ctx({ platformId: id, secondsOnPlatform: 0.1 })));
++      expect(early).toEqual([]);
++    }
++  });
++});
++
++describe('HintEngine', () => {
++  const tips: HintDef[] = [
++    { id: 'a', text: 'tip a is here', when: (c) => c.platformId === 'A' },
++    { id: 'b', text: 'tip b is here', when: (c) => c.platformId === 'B' },
++  ];
++
++  it('returns the first matching hint, once', () => {
++    const e = new HintEngine(new MemoryStore(), tips, { cooldown: 0 });
++    expect(e.update(0.1, ctx({ platformId: 'A' }))?.id).toBe('a');
++    expect(e.update(0.1, ctx({ platformId: 'A' }))).toBeNull();
++    expect(e.hasSeen('a')).toBe(true);
++  });
++
++  it('waits for the cooldown between hints', () => {
++    const e = new HintEngine(new MemoryStore(), tips, { cooldown: 5 });
++    expect(e.update(0.1, ctx({ platformId: 'A' }))?.id).toBe('a');
++    expect(e.update(2, ctx({ platformId: 'B' }))).toBeNull();
++    expect(e.update(3.5, ctx({ platformId: 'B' }))?.id).toBe('b');
++  });
++
++  it('stays quiet when nothing matches', () => {
++    const e = new HintEngine(new MemoryStore(), tips, { cooldown: 0 });
++    expect(e.update(1, ctx({ platformId: 'Z' }))).toBeNull();
++    expect(e.hasSeen('a')).toBe(false);
++  });
++
++  it('remembers seen hints between sessions', () => {
++    const store = new MemoryStore();
++    new HintEngine(store, tips, { cooldown: 0 }).update(1, ctx({ platformId: 'A' }));
++    const again = new HintEngine(store, tips, { cooldown: 0 });
++    expect(again.hasSeen('a')).toBe(true);
++    expect(again.update(1, ctx({ platformId: 'A' }))).toBeNull();
++  });
++
++  it('ignores corrupt or wrongly typed saved data', () => {
++    const store = new MemoryStore();
++    store.setItem('lanternfall.hints', '{oops');
++    expect(new HintEngine(store, tips).hasSeen('a')).toBe(false);
++    store.setItem('lanternfall.hints', JSON.stringify(['a', 7, null, { x: 1 }]));
++    const e = new HintEngine(store, tips);
++    expect(e.hasSeen('a')).toBe(true);
++    expect(HintEngine.sanitize('nope')).toEqual([]);
++  });
++
++  it('earlier hints in the list win when several match at once', () => {
++    const both: HintDef[] = [
++      { id: 'first', text: 'first tip text', when: () => true },
++      { id: 'second', text: 'second tip text', when: () => true },
++    ];
++    const e = new HintEngine(new MemoryStore(), both, { cooldown: 0 });
++    expect(e.update(1, base)?.id).toBe('first');
++    expect(e.update(1, base)?.id).toBe('second');
++  });
++
++  it('shows the stuck tip after three falls even with the real hint list', () => {
++    const e = new HintEngine(new MemoryStore());
++    expect(e.update(1, ctx({ fallsSinceCheckpoint: 2 }))).toBeNull();
++    expect(e.update(1, ctx({ fallsSinceCheckpoint: 3 }))?.id).toBe('stuck');
++  });
++});
+-- 
+2.43.0
+

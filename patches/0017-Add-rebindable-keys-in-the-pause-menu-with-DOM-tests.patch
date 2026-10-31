@@ -1,0 +1,1921 @@
+From 3d05f18b71ce66961ff35129860c9c844faafd2a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 11:08:54 +0000
+Subject: [PATCH 17/18] Add rebindable keys in the pause menu, with DOM tests
+ for the menus
+
+Picking a key already in use swaps the two actions. Escape always pauses
+and cannot be bound. The gamepad follows the keyboard layout. Adds jsdom
+(v25, which supports the Node 20 used in CI) as a dev dependency to test
+the Hud screens.
+---
+ lanternfall/README.md              |   5 +-
+ lanternfall/index.html             |   5 +
+ lanternfall/package-lock.json      | 808 +++++++++++++++++++++++++++--
+ lanternfall/package.json           |   1 +
+ lanternfall/src/core/Game.ts       |  37 +-
+ lanternfall/src/input/Input.ts     |  20 +-
+ lanternfall/src/input/Keybinds.ts  | 141 +++++
+ lanternfall/src/ui/Hud.ts          |  69 ++-
+ lanternfall/tests/Hud.test.ts      | 153 ++++++
+ lanternfall/tests/Keybinds.test.ts | 164 ++++++
+ 10 files changed, 1345 insertions(+), 58 deletions(-)
+ create mode 100644 lanternfall/src/input/Keybinds.ts
+ create mode 100644 lanternfall/tests/Hud.test.ts
+ create mode 100644 lanternfall/tests/Keybinds.test.ts
+
+diff --git a/lanternfall/README.md b/lanternfall/README.md
+index 7b623e6..b5e7776 100644
+--- a/lanternfall/README.md
++++ b/lanternfall/README.md
+@@ -42,6 +42,7 @@ within 4.5 m. It wakes and the bridge stays solid for the rest of the run (kept
+ - **Achievements:** seven, shown on the win screen (src/core/Achievements.ts). The time targets (120 s and 75 s) are design guesses, not measured data. Retune them after timing real players.
+ - **Lifetime stats:** play time, falls and runs finished, shown on the pause screen (src/core/LifetimeStats.ts). Saved when you pause, finish, or every 30 seconds.
+ - **Settings:** tips on/off, ghost on/off and reduced screen flashing, next to volume, camera speed and invert-Y.
++- **Rebindable keys:** every keyboard action can be changed in the pause menu (src/input/Keybinds.ts). Picking a key that is already used swaps the two actions, Escape always pauses and can never be bound, and a clash in saved data resets the layout. The gamepad follows the same layout for jump, pulse, restart and pause.
+ - All of these save to localStorage and fall back to memory if storage is blocked. They are unit-tested, but nobody has play-tested the wording or timing of the tips yet.
+ 
+ ## Moving platforms (Room 3)
+@@ -60,14 +61,14 @@ For Room 3 there is also a bot (tests/helpers/room3Sim.ts) that tries every star
+ - src/player: Player (character + lantern), ThirdPersonCamera (follow camera with wall collision)
+ - src/input: Input (keyboard + gamepad polling), GamepadMap, analog (deadzones), TouchControls
+ - src/audio: Synth (all sounds generated live, no audio files) - src/fx: Sparkles - src/ui: Hud
+-- tests: unit tests for the logic above, including bots that complete the route and sweep Room 3's timing
++- tests: unit tests for the logic above, plus jsdom tests for the menu screens, including bots that complete the route and sweep Room 3's timing
+ 
+ ## Design decision: no Rapier yet
+ Platforms are axis-aligned boxes, so a small custom collision system (PlayerBody) is simpler, deterministic and
+ fully unit-tested. Moving platforms use the same boxes, updated each physics step. Rapier can be added later if rotating or sloped geometry is needed.
+ 
+ ## Status
+-`npm run lint`, `npm run build` and `npm test` pass (241 tests). Tests cover the logic: physics, the lantern rule, beacons,
++`npm run lint`, `npm run build` and `npm test` pass (278 tests). Tests cover the logic: physics, the lantern rule, beacons,
+ moving platforms, camera ray clipping, settings, records, gamepad mapping and level layout.
+ Rendering, HUD, audio, touch controls and the feel of the game are **not** covered by automated tests and need playtesting.
+ 
+diff --git a/lanternfall/index.html b/lanternfall/index.html
+index 7bbbf8f..e51583a 100644
+--- a/lanternfall/index.html
++++ b/lanternfall/index.html
+@@ -43,6 +43,11 @@
+       .settings label { display: flex; align-items: center; justify-content: space-between; gap: 16px; pointer-events: auto; }
+       .settings input[type=range] { width: 180px; accent-color: #ffd36b; }
+       .settings .check { justify-content: flex-start; gap: 8px; }
++      .keys { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; text-align: left; font-size: 14px; max-height: 34vh; overflow-y: auto; padding-right: 6px; }
++      .keyrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
++      .keyrow button { margin: 0; padding: 4px 14px; min-width: 96px; font-size: 13px; letter-spacing: 0; pointer-events: auto; }
++      .keyrow button.listening { background: #fff; outline: 2px solid #ffd36b; }
++      .keynote { min-height: 1.3em; font-size: 12px; color: #ffd36b; }
+       .best { margin: 4px 0 0; color: #ffd36b; font-size: 14px; min-height: 1.2em; }
+       .touch-controls { position: absolute; inset: 0; pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+       .touch-controls.hidden { display: none; }
+diff --git a/lanternfall/package-lock.json b/lanternfall/package-lock.json
+index b3d6f57..545ddf0 100644
+--- a/lanternfall/package-lock.json
++++ b/lanternfall/package-lock.json
+@@ -15,12 +15,142 @@
+         "@types/three": "^0.170.0",
+         "eslint": "^9.0.0",
+         "globals": "^15.0.0",
++        "jsdom": "^25.0.1",
+         "typescript": "^5.6.0",
+         "typescript-eslint": "^8.0.0",
+         "vite": "^6.0.0",
+         "vitest": "^2.1.0"
+       }
+     },
++    "node_modules/@asamuzakjp/css-color": {
++      "version": "3.2.0",
++      "resolved": "https://registry.npmjs.org/@asamuzakjp/css-color/-/css-color-3.2.0.tgz",
++      "integrity": "sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@csstools/css-calc": "^2.1.3",
++        "@csstools/css-color-parser": "^3.0.9",
++        "@csstools/css-parser-algorithms": "^3.0.4",
++        "@csstools/css-tokenizer": "^3.0.3",
++        "lru-cache": "^10.4.3"
++      }
++    },
++    "node_modules/@csstools/color-helpers": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
++      "integrity": "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT-0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@csstools/css-calc": {
++      "version": "2.1.4",
++      "resolved": "https://registry.npmjs.org/@csstools/css-calc/-/css-calc-2.1.4.tgz",
++      "integrity": "sha512-3N8oaj+0juUw/1H3YwmDDJXCgTB1gKU6Hc/bB502u9zR0q2vd786XJH9QfrKIEgFlZmhZiq6epXl4rHqhzsIgQ==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-parser-algorithms": "^3.0.5",
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-color-parser": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/@csstools/css-color-parser/-/css-color-parser-3.1.0.tgz",
++      "integrity": "sha512-nbtKwh3a6xNVIp/VRuXV64yTKnb1IjTAEEh3irzS+HkKjAOYLTGNb9pmVNntZ8iVBHcWDA2Dof0QtPgFI1BaTA==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@csstools/color-helpers": "^5.1.0",
++        "@csstools/css-calc": "^2.1.4"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-parser-algorithms": "^3.0.5",
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-parser-algorithms": {
++      "version": "3.0.5",
++      "resolved": "https://registry.npmjs.org/@csstools/css-parser-algorithms/-/css-parser-algorithms-3.0.5.tgz",
++      "integrity": "sha512-DaDeUkXZKjdGhgYaHNJTV9pV7Y9B3b644jCLs9Upc3VeNGg6LWARAT6O+Q+/COo+2gg/bM5rhpMAtf70WqfBdQ==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-tokenizer": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@csstools/css-tokenizer/-/css-tokenizer-3.0.4.tgz",
++      "integrity": "sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/@esbuild/aix-ppc64": {
+       "version": "0.25.12",
+       "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.25.12.tgz",
+@@ -701,9 +831,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -805,9 +932,6 @@
+         "arm"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -822,9 +946,6 @@
+         "arm"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -839,9 +960,6 @@
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -856,9 +974,6 @@
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -873,9 +988,6 @@
+         "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -890,9 +1002,6 @@
+         "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -907,9 +1016,6 @@
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -924,9 +1030,6 @@
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -941,9 +1044,6 @@
+         "riscv64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -958,9 +1058,6 @@
+         "riscv64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -975,9 +1072,6 @@
+         "s390x"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -992,9 +1086,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1009,9 +1100,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -1550,6 +1638,16 @@
+         "acorn": "^6.0.0 || ^7.0.0 || ^8.0.0"
+       }
+     },
++    "node_modules/agent-base": {
++      "version": "7.1.4",
++      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz",
++      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 14"
++      }
++    },
+     "node_modules/ajv": {
+       "version": "6.15.0",
+       "resolved": "https://registry.npmjs.org/ajv/-/ajv-6.15.0.tgz",
+@@ -1600,6 +1698,13 @@
+         "node": ">=12"
+       }
+     },
++    "node_modules/asynckit": {
++      "version": "0.4.0",
++      "resolved": "https://registry.npmjs.org/asynckit/-/asynckit-0.4.0.tgz",
++      "integrity": "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/balanced-match": {
+       "version": "1.0.2",
+       "resolved": "https://registry.npmjs.org/balanced-match/-/balanced-match-1.0.2.tgz",
+@@ -1628,6 +1733,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/call-bind-apply-helpers": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
++      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0",
++        "function-bind": "^1.1.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/callsites": {
+       "version": "3.1.0",
+       "resolved": "https://registry.npmjs.org/callsites/-/callsites-3.1.0.tgz",
+@@ -1702,6 +1821,19 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/combined-stream": {
++      "version": "1.0.8",
++      "resolved": "https://registry.npmjs.org/combined-stream/-/combined-stream-1.0.8.tgz",
++      "integrity": "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "delayed-stream": "~1.0.0"
++      },
++      "engines": {
++        "node": ">= 0.8"
++      }
++    },
+     "node_modules/concat-map": {
+       "version": "0.0.1",
+       "resolved": "https://registry.npmjs.org/concat-map/-/concat-map-0.0.1.tgz",
+@@ -1724,6 +1856,41 @@
+         "node": ">= 8"
+       }
+     },
++    "node_modules/cssstyle": {
++      "version": "4.6.0",
++      "resolved": "https://registry.npmjs.org/cssstyle/-/cssstyle-4.6.0.tgz",
++      "integrity": "sha512-2z+rWdzbbSZv6/rhtvzvqeZQHrBaqgogqt85sqFNbabZOuFbCVFb8kPeEtZjiKkbrm395irpNKiYeFeLiQnFPg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@asamuzakjp/css-color": "^3.2.0",
++        "rrweb-cssom": "^0.8.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/cssstyle/node_modules/rrweb-cssom": {
++      "version": "0.8.0",
++      "resolved": "https://registry.npmjs.org/rrweb-cssom/-/rrweb-cssom-0.8.0.tgz",
++      "integrity": "sha512-guoltQEx+9aMf2gDZ0s62EcV8lsXR+0w8915TC3ITdn2YueuNjdAYh/levpU9nFaoChh9RUS5ZdQMrKfVEN9tw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/data-urls": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/data-urls/-/data-urls-5.0.0.tgz",
++      "integrity": "sha512-ZYP5VBHshaDAiVZxjbRVcFJpc+4xGgT0bK3vzy1HLN8jTO975HEbuYzZJcHoQEY5K1a0z8YayJkyVETa08eNTg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-mimetype": "^4.0.0",
++        "whatwg-url": "^14.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/debug": {
+       "version": "4.4.3",
+       "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+@@ -1742,6 +1909,13 @@
+         }
+       }
+     },
++    "node_modules/decimal.js": {
++      "version": "10.6.0",
++      "resolved": "https://registry.npmjs.org/decimal.js/-/decimal.js-10.6.0.tgz",
++      "integrity": "sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/deep-eql": {
+       "version": "5.0.2",
+       "resolved": "https://registry.npmjs.org/deep-eql/-/deep-eql-5.0.2.tgz",
+@@ -1759,6 +1933,64 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/delayed-stream": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/delayed-stream/-/delayed-stream-1.0.0.tgz",
++      "integrity": "sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.4.0"
++      }
++    },
++    "node_modules/dunder-proto": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
++      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "call-bind-apply-helpers": "^1.0.1",
++        "es-errors": "^1.3.0",
++        "gopd": "^1.2.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/entities": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/entities/-/entities-6.0.1.tgz",
++      "integrity": "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=0.12"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
++    "node_modules/es-define-property": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
++      "integrity": "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/es-errors": {
++      "version": "1.3.0",
++      "resolved": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz",
++      "integrity": "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/es-module-lexer": {
+       "version": "1.7.0",
+       "resolved": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-1.7.0.tgz",
+@@ -1766,6 +1998,35 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/es-object-atoms": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz",
++      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/es-set-tostringtag": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz",
++      "integrity": "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0",
++        "get-intrinsic": "^1.2.6",
++        "has-tostringtag": "^1.0.2",
++        "hasown": "^2.0.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/esbuild": {
+       "version": "0.25.12",
+       "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz",
+@@ -2093,6 +2354,23 @@
+       "dev": true,
+       "license": "ISC"
+     },
++    "node_modules/form-data": {
++      "version": "4.0.6",
++      "resolved": "https://registry.npmjs.org/form-data/-/form-data-4.0.6.tgz",
++      "integrity": "sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "asynckit": "^0.4.0",
++        "combined-stream": "^1.0.8",
++        "es-set-tostringtag": "^2.1.0",
++        "hasown": "^2.0.4",
++        "mime-types": "^2.1.35"
++      },
++      "engines": {
++        "node": ">= 6"
++      }
++    },
+     "node_modules/fsevents": {
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+@@ -2108,6 +2386,55 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/function-bind": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz",
++      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/get-intrinsic": {
++      "version": "1.3.0",
++      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
++      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "call-bind-apply-helpers": "^1.0.2",
++        "es-define-property": "^1.0.1",
++        "es-errors": "^1.3.0",
++        "es-object-atoms": "^1.1.1",
++        "function-bind": "^1.1.2",
++        "get-proto": "^1.0.1",
++        "gopd": "^1.2.0",
++        "has-symbols": "^1.1.0",
++        "hasown": "^2.0.2",
++        "math-intrinsics": "^1.1.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/get-proto": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
++      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "dunder-proto": "^1.0.1",
++        "es-object-atoms": "^1.0.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/glob-parent": {
+       "version": "6.0.2",
+       "resolved": "https://registry.npmjs.org/glob-parent/-/glob-parent-6.0.2.tgz",
+@@ -2134,6 +2461,19 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/gopd": {
++      "version": "1.2.0",
++      "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
++      "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
+     "node_modules/has-flag": {
+       "version": "4.0.0",
+       "resolved": "https://registry.npmjs.org/has-flag/-/has-flag-4.0.0.tgz",
+@@ -2144,6 +2484,102 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/has-symbols": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
++      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/has-tostringtag": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz",
++      "integrity": "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "has-symbols": "^1.0.3"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/hasown": {
++      "version": "2.0.4",
++      "resolved": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz",
++      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "function-bind": "^1.1.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/html-encoding-sniffer": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/html-encoding-sniffer/-/html-encoding-sniffer-4.0.0.tgz",
++      "integrity": "sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-encoding": "^3.1.1"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/http-proxy-agent": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/http-proxy-agent/-/http-proxy-agent-7.0.2.tgz",
++      "integrity": "sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "^7.1.0",
++        "debug": "^4.3.4"
++      },
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/https-proxy-agent": {
++      "version": "7.0.6",
++      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz",
++      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "^7.1.2",
++        "debug": "4"
++      },
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/iconv-lite": {
++      "version": "0.6.3",
++      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.6.3.tgz",
++      "integrity": "sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "safer-buffer": ">= 2.1.2 < 3.0.0"
++      },
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
+     "node_modules/ignore": {
+       "version": "5.3.2",
+       "resolved": "https://registry.npmjs.org/ignore/-/ignore-5.3.2.tgz",
+@@ -2204,6 +2640,13 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/is-potential-custom-element-name": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/is-potential-custom-element-name/-/is-potential-custom-element-name-1.0.1.tgz",
++      "integrity": "sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/isexe": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/isexe/-/isexe-2.0.0.tgz",
+@@ -2234,6 +2677,47 @@
+         "js-yaml": "bin/js-yaml.js"
+       }
+     },
++    "node_modules/jsdom": {
++      "version": "25.0.1",
++      "resolved": "https://registry.npmjs.org/jsdom/-/jsdom-25.0.1.tgz",
++      "integrity": "sha512-8i7LzZj7BF8uplX+ZyOlIz86V6TAsSs+np6m1kpW9u0JWi4z/1t+FzcK1aek+ybTnAC4KhBL4uXCNT0wcUIeCw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "cssstyle": "^4.1.0",
++        "data-urls": "^5.0.0",
++        "decimal.js": "^10.4.3",
++        "form-data": "^4.0.0",
++        "html-encoding-sniffer": "^4.0.0",
++        "http-proxy-agent": "^7.0.2",
++        "https-proxy-agent": "^7.0.5",
++        "is-potential-custom-element-name": "^1.0.1",
++        "nwsapi": "^2.2.12",
++        "parse5": "^7.1.2",
++        "rrweb-cssom": "^0.7.1",
++        "saxes": "^6.0.0",
++        "symbol-tree": "^3.2.4",
++        "tough-cookie": "^5.0.0",
++        "w3c-xmlserializer": "^5.0.0",
++        "webidl-conversions": "^7.0.0",
++        "whatwg-encoding": "^3.1.1",
++        "whatwg-mimetype": "^4.0.0",
++        "whatwg-url": "^14.0.0",
++        "ws": "^8.18.0",
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "canvas": "^2.11.2"
++      },
++      "peerDependenciesMeta": {
++        "canvas": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/json-buffer": {
+       "version": "3.0.1",
+       "resolved": "https://registry.npmjs.org/json-buffer/-/json-buffer-3.0.1.tgz",
+@@ -2309,6 +2793,13 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/lru-cache": {
++      "version": "10.4.3",
++      "resolved": "https://registry.npmjs.org/lru-cache/-/lru-cache-10.4.3.tgz",
++      "integrity": "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==",
++      "dev": true,
++      "license": "ISC"
++    },
+     "node_modules/magic-string": {
+       "version": "0.30.21",
+       "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz",
+@@ -2319,6 +2810,16 @@
+         "@jridgewell/sourcemap-codec": "^1.5.5"
+       }
+     },
++    "node_modules/math-intrinsics": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
++      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/meshoptimizer": {
+       "version": "0.18.1",
+       "resolved": "https://registry.npmjs.org/meshoptimizer/-/meshoptimizer-0.18.1.tgz",
+@@ -2326,6 +2827,29 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/mime-db": {
++      "version": "1.52.0",
++      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
++      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/mime-types": {
++      "version": "2.1.35",
++      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
++      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "mime-db": "1.52.0"
++      },
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
+     "node_modules/minimatch": {
+       "version": "3.1.5",
+       "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-3.1.5.tgz",
+@@ -2372,6 +2896,13 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/nwsapi": {
++      "version": "2.2.28",
++      "resolved": "https://registry.npmjs.org/nwsapi/-/nwsapi-2.2.28.tgz",
++      "integrity": "sha512-IlVB7OS7qrOsVYlpnFIkETjMwT9jwvmocJmmM+GZU/PAB3uGi9Ezd7vcWhWBUnSc0ya4ppmQITOyP1ez9gg8cg==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/optionator": {
+       "version": "0.9.4",
+       "resolved": "https://registry.npmjs.org/optionator/-/optionator-0.9.4.tgz",
+@@ -2435,6 +2966,19 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/parse5": {
++      "version": "7.3.0",
++      "resolved": "https://registry.npmjs.org/parse5/-/parse5-7.3.0.tgz",
++      "integrity": "sha512-IInvU7fabl34qmi9gY8XOVxhYyMyuH2xUNpb2q8/Y+7552KlejkRvqvD19nMoUW/uQGGbqNpA6Tufu5FL5BZgw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "entities": "^6.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
+     "node_modules/path-exists": {
+       "version": "4.0.0",
+       "resolved": "https://registry.npmjs.org/path-exists/-/path-exists-4.0.0.tgz",
+@@ -2597,6 +3141,33 @@
+         "fsevents": "~2.3.2"
+       }
+     },
++    "node_modules/rrweb-cssom": {
++      "version": "0.7.1",
++      "resolved": "https://registry.npmjs.org/rrweb-cssom/-/rrweb-cssom-0.7.1.tgz",
++      "integrity": "sha512-TrEMa7JGdVm0UThDJSx7ddw5nVm3UJS9o9CCIZ72B1vSyEZoziDqBYP3XIoi/12lKrJR8rE3jeFHMok2F/Mnsg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/safer-buffer": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz",
++      "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/saxes": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/saxes/-/saxes-6.0.0.tgz",
++      "integrity": "sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "xmlchars": "^2.2.0"
++      },
++      "engines": {
++        "node": ">=v12.22.7"
++      }
++    },
+     "node_modules/semver": {
+       "version": "7.8.5",
+       "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
+@@ -2690,6 +3261,13 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/symbol-tree": {
++      "version": "3.2.4",
++      "resolved": "https://registry.npmjs.org/symbol-tree/-/symbol-tree-3.2.4.tgz",
++      "integrity": "sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/three": {
+       "version": "0.170.0",
+       "resolved": "https://registry.npmjs.org/three/-/three-0.170.0.tgz",
+@@ -2757,6 +3335,52 @@
+         "node": ">=14.0.0"
+       }
+     },
++    "node_modules/tldts": {
++      "version": "6.1.86",
++      "resolved": "https://registry.npmjs.org/tldts/-/tldts-6.1.86.tgz",
++      "integrity": "sha512-WMi/OQ2axVTf/ykqCQgXiIct+mSQDFdH2fkwhPwgEwvJ1kSzZRiinb0zF2Xb8u4+OqPChmyI6MEu4EezNJz+FQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tldts-core": "^6.1.86"
++      },
++      "bin": {
++        "tldts": "bin/cli.js"
++      }
++    },
++    "node_modules/tldts-core": {
++      "version": "6.1.86",
++      "resolved": "https://registry.npmjs.org/tldts-core/-/tldts-core-6.1.86.tgz",
++      "integrity": "sha512-Je6p7pkk+KMzMv2XXKmAE3McmolOQFdxkKw0R8EYNr7sELW46JqnNeTX8ybPiQgvg1ymCoF8LXs5fzFaZvJPTA==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tough-cookie": {
++      "version": "5.1.2",
++      "resolved": "https://registry.npmjs.org/tough-cookie/-/tough-cookie-5.1.2.tgz",
++      "integrity": "sha512-FVDYdxtnj0G6Qm/DhNPSb8Ju59ULcup3tuJxkFb5K8Bv2pUXILbf0xZWU8PX8Ov19OXljbUyveOFwRMwkXzO+A==",
++      "dev": true,
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "tldts": "^6.1.32"
++      },
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/tr46": {
++      "version": "5.1.1",
++      "resolved": "https://registry.npmjs.org/tr46/-/tr46-5.1.1.tgz",
++      "integrity": "sha512-hdF5ZgjTqgAntKkklYw0R03MG2x/bSzTtkxmIRw/sTNV8YXsCJ1tfLAX23lhxhHJlEf3CRCOCGGWw3vI3GaSPw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "punycode": "^2.3.1"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/ts-api-utils": {
+       "version": "2.5.0",
+       "resolved": "https://registry.npmjs.org/ts-api-utils/-/ts-api-utils-2.5.0.tgz",
+@@ -4002,6 +4626,67 @@
+         }
+       }
+     },
++    "node_modules/w3c-xmlserializer": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/w3c-xmlserializer/-/w3c-xmlserializer-5.0.0.tgz",
++      "integrity": "sha512-o8qghlI8NZHU1lLPrpi2+Uq7abh4GGPpYANlalzWxyWteJOCsr/P+oPBA49TOLu5FTZO4d3F9MnWJfiMo4BkmA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/webidl-conversions": {
++      "version": "7.0.0",
++      "resolved": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-7.0.0.tgz",
++      "integrity": "sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/whatwg-encoding": {
++      "version": "3.1.1",
++      "resolved": "https://registry.npmjs.org/whatwg-encoding/-/whatwg-encoding-3.1.1.tgz",
++      "integrity": "sha512-6qN4hJdMwfYBtE3YBTTHhoeuUrDBPZmbQaxWAqSALV/MeEnR5z1xd8UKud2RAkFoPkmB+hli1TZSnyi84xz1vQ==",
++      "deprecated": "Use @exodus/bytes instead for a more spec-conformant and faster implementation",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "iconv-lite": "0.6.3"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/whatwg-mimetype": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-4.0.0.tgz",
++      "integrity": "sha512-QaKxh0eNIi2mE9p2vEdzfagOKHCcj1pJ56EEHGQOVxp8r9/iszLUUV7v89x9O1p/T+NlTM5W7jW6+cz4Fq1YVg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/whatwg-url": {
++      "version": "14.2.0",
++      "resolved": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-14.2.0.tgz",
++      "integrity": "sha512-De72GdQZzNTUBBChsXueQUnPKDkg/5A5zp7pFDuQAj5UFoENpiACU0wlCvzpAGnTkj++ihpKwKyYewn/XNUbKw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tr46": "^5.1.0",
++        "webidl-conversions": "^7.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/which": {
+       "version": "2.0.2",
+       "resolved": "https://registry.npmjs.org/which/-/which-2.0.2.tgz",
+@@ -4045,6 +4730,45 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/ws": {
++      "version": "8.22.1",
++      "resolved": "https://registry.npmjs.org/ws/-/ws-8.22.1.tgz",
++      "integrity": "sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/xml-name-validator": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/xml-name-validator/-/xml-name-validator-5.0.0.tgz",
++      "integrity": "sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/xmlchars": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/xmlchars/-/xmlchars-2.2.0.tgz",
++      "integrity": "sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/yocto-queue": {
+       "version": "0.1.0",
+       "resolved": "https://registry.npmjs.org/yocto-queue/-/yocto-queue-0.1.0.tgz",
+diff --git a/lanternfall/package.json b/lanternfall/package.json
+index 247d407..2469a0e 100644
+--- a/lanternfall/package.json
++++ b/lanternfall/package.json
+@@ -18,6 +18,7 @@
+     "@types/three": "^0.170.0",
+     "eslint": "^9.0.0",
+     "globals": "^15.0.0",
++    "jsdom": "^25.0.1",
+     "typescript": "^5.6.0",
+     "typescript-eslint": "^8.0.0",
+     "vite": "^6.0.0",
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 73606c7..cb1959a 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -2,6 +2,7 @@ import * as THREE from 'three';
+ import { Synth } from '../audio/Synth';
+ import { Sparkles } from '../fx/Sparkles';
+ import { Input } from '../input/Input';
++import { ACTION_LABELS, BindingStore, keyLabel } from '../input/Keybinds';
+ import { TouchControls } from '../input/TouchControls';
+ import { CharacterModel } from '../player/CharacterModel';
+ import { Player } from '../player/Player';
+@@ -66,6 +67,7 @@ export class Game {
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
+   private readonly hints = new HintEngine(browserStore());
++  private readonly keybinds = new BindingStore(browserStore());
+   private readonly lifetime = new LifetimeStats(browserStore());
+   private sinceAutosave = 0;
+   private readonly achievements = new AchievementBook(browserStore());
+@@ -127,6 +129,23 @@ export class Game {
+     this.hud.onResume = () => this.togglePause();
+     this.hud.onRestart = () => this.restart();
+     this.hud.onSettings = (patch) => this.settings.set(patch);
++    this.input.bindings = this.keybinds.get();
++    this.hud.setBindings(this.keybinds.get());
++    this.hud.onRebind = (action, code) => {
++      const result = this.keybinds.rebind(action, code);
++      if (!result) {
++        this.hud.setBindings(this.keybinds.get(), 'That key cannot be used.');
++        return;
++      }
++      const swap = result.swapped ? `${ACTION_LABELS[result.swapped]} now uses ${keyLabel(result.bindings[result.swapped])}.` : '';
++      this.input.bindings = result.bindings;
++      this.hud.setBindings(result.bindings, swap);
++    };
++    this.hud.onResetKeys = () => {
++      this.keybinds.reset();
++      this.input.bindings = this.keybinds.get();
++      this.hud.setBindings(this.keybinds.get(), 'Keys reset.');
++    };
+     this.unsubscribeSettings = this.settings.onChange((v) => this.applySettings(v));
+     this.applySettings(this.settings.get());
+     this.hud.setSettings(this.settings.get());
+@@ -319,10 +338,10 @@ export class Game {
+     this.touch?.setVisible(this.state.phase === 'playing');
+ 
+     if (this.state.phase === 'playing') {
+-      if (this.input.down('ArrowLeft')) this.rig.rotate(-1.8 * dt);
+-      if (this.input.down('ArrowRight')) this.rig.rotate(1.8 * dt);
+-      if (this.input.pressed('Space')) this.jumpQueued = true;
+-      if (this.input.pressed('KeyQ') || this.touch?.consumePulse()) this.pulseQueued = true;
++      if (this.input.actionDown('turnLeft')) this.rig.rotate(-1.8 * dt);
++      if (this.input.actionDown('turnRight')) this.rig.rotate(1.8 * dt);
++      if (this.input.actionPressed('jump')) this.jumpQueued = true;
++      if (this.input.actionPressed('pulse') || this.touch?.consumePulse()) this.pulseQueued = true;
+       if (this.touch?.consumeJump()) this.jumpQueued = true;
+       const pad = this.input.pad;
+       if (pad.lookX !== 0 || pad.lookY !== 0) this.rig.look(pad.lookX * 500 * dt, pad.lookY * 350 * dt);
+@@ -358,9 +377,9 @@ export class Game {
+   };
+ 
+   private handleKeys(): void {
+-    if (this.input.pressed('Escape') || this.input.pressed('KeyP')) this.togglePause();
+-    if (this.input.pressed('KeyM')) this.hud.toast(this.audio.toggleMute() ? 'Sound off' : 'Sound on', 1.2);
+-    if (this.input.pressed('KeyR') && this.state.phase === 'playing') this.respawn(false);
++    if (this.input.actionPressed('pause')) this.togglePause();
++    if (this.input.actionPressed('mute')) this.hud.toast(this.audio.toggleMute() ? 'Sound off' : 'Sound on', 1.2);
++    if (this.input.actionPressed('restart') && this.state.phase === 'playing') this.respawn(false);
+   }
+ 
+   /** One fixed physics/gameplay step. */
+@@ -403,8 +422,8 @@ export class Game {
+     const pad = this.input.pad;
+     const tx = this.touch?.moveX ?? 0;
+     const tz = this.touch?.moveZ ?? 0;
+-    const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
+-    const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
++    const ix = (this.input.actionDown('right') ? 1 : 0) - (this.input.actionDown('left') ? 1 : 0) + pad.moveX + tx;
++    const iz = (this.input.actionDown('forward') ? 1 : 0) - (this.input.actionDown('back') ? 1 : 0) + pad.moveZ + tz;
+     // Moving platforms: carry the rider, push the player out of anything that slid into them.
+     const movers = applyMovers(body, MOVERS, clockBefore, this.moverTime, (id) => this.reveal.isSolid(id) || !this.level.isHiddenMover(id));
+     const ev = body.step(
+diff --git a/lanternfall/src/input/Input.ts b/lanternfall/src/input/Input.ts
+index 2f6b956..13b4341 100644
+--- a/lanternfall/src/input/Input.ts
++++ b/lanternfall/src/input/Input.ts
+@@ -1,6 +1,8 @@
+ import { NEUTRAL_PAD, PadEdges, PadState, readPad } from './GamepadMap';
++import { Action, Bindings, DEFAULT_BINDINGS } from './Keybinds';
+ 
+-const PAD_KEYS = { jump: 'Space', pulse: 'KeyQ', restart: 'KeyR', pause: 'Escape' } as const;
++/** Which action each gamepad button triggers. The pad is not rebindable, but it follows the keyboard layout. */
++const PAD_ACTIONS = { jump: 'jump', pulse: 'pulse', restart: 'restart', pause: 'pause' } as const;
+ 
+ /** Keyboard and gamepad state. `down` = held; `pressed` = went down this frame. */
+ export class Input {
+@@ -9,6 +11,8 @@ export class Input {
+   /** Latest gamepad reading (neutral when no pad is connected). */
+   pad: PadState = { ...NEUTRAL_PAD };
+   private readonly padEdges = new PadEdges();
++  /** The player's keyboard layout. Set by the game; defaults to WASD. */
++  bindings: Bindings = DEFAULT_BINDINGS;
+   private static readonly BLOCKED = new Set(['Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+ 
+   constructor() {
+@@ -25,16 +29,26 @@ export class Input {
+     return this.justDown.has(code);
+   }
+ 
++  /** Is the key bound to this action held right now? */
++  actionDown(action: Action): boolean {
++    return this.held.has(this.bindings[action]);
++  }
++
++  /** Did the key bound to this action go down this frame? Escape always counts as pause. */
++  actionPressed(action: Action): boolean {
++    return this.justDown.has(this.bindings[action]) || (action === 'pause' && this.justDown.has('Escape'));
++  }
++
+   /**
+    * Read the first connected gamepad. Call once per frame before reading input.
+    * Pad buttons are turned into the same key codes the keyboard uses, so game code
+-   * only has to ask `pressed('Space')` once.
++   * only has to ask `actionPressed('jump')` once.
+    */
+   pollPad(): void {
+     const list = typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function' ? navigator.getGamepads() : [];
+     const connected = Array.from(list).find((p) => p && p.connected) ?? null;
+     this.pad = readPad(connected);
+-    for (const button of this.padEdges.update(this.pad)) this.justDown.add(PAD_KEYS[button]);
++    for (const button of this.padEdges.update(this.pad)) this.justDown.add(this.bindings[PAD_ACTIONS[button]]);
+   }
+ 
+   /** Call once at the end of every frame. */
+diff --git a/lanternfall/src/input/Keybinds.ts b/lanternfall/src/input/Keybinds.ts
+new file mode 100644
+index 0000000..81640c9
+--- /dev/null
++++ b/lanternfall/src/input/Keybinds.ts
+@@ -0,0 +1,141 @@
++import { KeyValueStore, readJson } from '../core/storage';
++
++/** Everything the keyboard can do in game. Gamepad and touch have their own fixed layouts. */
++export type Action =
++  | 'forward' | 'back' | 'left' | 'right'
++  | 'jump' | 'pulse' | 'restart' | 'pause' | 'mute'
++  | 'turnLeft' | 'turnRight';
++
++export const ACTIONS: readonly Action[] = [
++  'forward', 'back', 'left', 'right', 'jump', 'pulse', 'restart', 'pause', 'mute', 'turnLeft', 'turnRight',
++];
++
++/** One key per action, as `KeyboardEvent.code` values (layout independent: "KeyW" is the W position). */
++export type Bindings = Readonly<Record<Action, string>>;
++
++export const DEFAULT_BINDINGS: Bindings = {
++  forward: 'KeyW',
++  back: 'KeyS',
++  left: 'KeyA',
++  right: 'KeyD',
++  jump: 'Space',
++  pulse: 'KeyQ',
++  restart: 'KeyR',
++  pause: 'KeyP',
++  mute: 'KeyM',
++  turnLeft: 'ArrowLeft',
++  turnRight: 'ArrowRight',
++};
++
++export const ACTION_LABELS: Readonly<Record<Action, string>> = {
++  forward: 'Move forward',
++  back: 'Move back',
++  left: 'Move left',
++  right: 'Move right',
++  jump: 'Jump',
++  pulse: 'Lantern pulse',
++  restart: 'Back to checkpoint',
++  pause: 'Pause',
++  mute: 'Mute',
++  turnLeft: 'Turn camera left',
++  turnRight: 'Turn camera right',
++};
++
++/** Escape always pauses and always cancels, so it can never be given to another action. */
++export const RESERVED_CODES: ReadonlySet<string> = new Set(['Escape']);
++
++const CODE_PATTERN = /^[A-Za-z0-9]{1,16}$/;
++
++export function isBindableCode(code: unknown): code is string {
++  return typeof code === 'string' && CODE_PATTERN.test(code) && !RESERVED_CODES.has(code);
++}
++
++/**
++ * Turn anything stored (old saves, edited JSON) into a valid set of bindings. Bad entries fall back to
++ * their default. If two actions would end up on the same key, the whole set is reset: a half-fixed
++ * layout would be more confusing than starting over.
++ */
++export function sanitizeBindings(raw: unknown): Bindings {
++  const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
++  const out = {} as Record<Action, string>;
++  const used = new Set<string>();
++  for (const action of ACTIONS) {
++    const saved = r[action];
++    const code = isBindableCode(saved) ? saved : DEFAULT_BINDINGS[action];
++    if (used.has(code)) return { ...DEFAULT_BINDINGS };
++    used.add(code);
++    out[action] = code;
++  }
++  return out;
++}
++
++export interface RebindResult {
++  bindings: Bindings;
++  /** If the new key was already in use, the action that took over the old key. */
++  swapped: Action | null;
++}
++
++/** Give `action` the key `code`. A key already used elsewhere is swapped, so no action is ever left without one. */
++export function rebind(bindings: Bindings, action: Action, code: string): RebindResult | null {
++  if (!isBindableCode(code)) return null;
++  if (bindings[action] === code) return { bindings, swapped: null };
++  const other = ACTIONS.find((a) => a !== action && bindings[a] === code) ?? null;
++  const next: Record<Action, string> = { ...bindings, [action]: code };
++  if (other) next[other] = bindings[action];
++  return { bindings: next, swapped: other };
++}
++
++/** Short text for a key button: "W", "Space", "←", "1". */
++export function keyLabel(code: string): string {
++  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
++  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
++  if (/^Numpad[0-9]$/.test(code)) return `Num ${code.slice(6)}`;
++  const arrows: Record<string, string> = { ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓' };
++  return arrows[code] ?? code.replace(/(Left|Right)$/, ' $1').trim();
++}
++
++type Listener = (b: Bindings) => void;
++
++/** Loads, validates, saves and announces changes to the keyboard layout. */
++export class BindingStore {
++  private current: Bindings;
++  private readonly listeners = new Set<Listener>();
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly key = 'lanternfall.keys',
++  ) {
++    this.current = sanitizeBindings(readJson(store, key));
++  }
++
++  get(): Bindings {
++    return this.current;
++  }
++
++  /** Returns what happened, or null if the key is not allowed. */
++  rebind(action: Action, code: string): RebindResult | null {
++    const result = rebind(this.current, action, code);
++    if (!result) return null;
++    if (result.bindings !== this.current) {
++      this.current = result.bindings;
++      this.save();
++    }
++    return result;
++  }
++
++  reset(): void {
++    this.current = { ...DEFAULT_BINDINGS };
++    this.save();
++  }
++
++  /** Returns an unsubscribe function. */
++  onChange(fn: Listener): () => void {
++    this.listeners.add(fn);
++    return () => this.listeners.delete(fn);
++  }
++
++  private save(): void {
++    this.store.setItem(this.key, JSON.stringify(this.current));
++    for (const fn of this.listeners) fn(this.current);
++  }
++}
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index c628f46..180c713 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -1,4 +1,5 @@
+ import { SETTING_LIMITS, Settings } from '../core/Settings';
++import { ACTIONS, ACTION_LABELS, Action, Bindings, DEFAULT_BINDINGS, keyLabel } from '../input/Keybinds';
+ 
+ const SETTING_INPUTS = ['#set-volume', '#set-sens', '#set-invert', '#set-hints', '#set-ghost', '#set-flash'];
+ 
+@@ -9,12 +10,17 @@ export class Hud {
+   onResume: () => void = () => {};
+   onRestart: () => void = () => {};
+   onSettings: (patch: Partial<Settings>) => void = () => {};
++  /** Called when the player picks a new key for an action. */
++  onRebind: (action: Action, code: string) => void = () => {};
++  onResetKeys: () => void = () => {};
+   /** When true the respawn flash is skipped (accessibility). */
+   reduceFlash = false;
+ 
+   private readonly root = document.createElement('div');
+   private readonly q = <T extends HTMLElement>(sel: string): T => this.root.querySelector(sel) as T;
+   private toastTimer = 0;
++  private listening: Action | null = null;
++  private bindings: Bindings = DEFAULT_BINDINGS;
+   private flashTimer = 0;
+ 
+   constructor(parent: HTMLElement) {
+@@ -33,7 +39,7 @@ export class Hud {
+             <li><b>Touch</b> on-screen stick and buttons</li>
+             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
+           </ul>
+-          <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
++          <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.<br>Keys can be changed in the pause menu.</p>
+           <p id="title-achievements" class="how"></p>
+           <button id="btn-continue" class="hidden">Continue</button>
+           <button id="btn-start">Begin</button>
+@@ -65,6 +71,9 @@ export class Hud {
+             <label class="check"><input id="set-ghost" type="checkbox"> Show ghost of best run</label>
+             <label class="check"><input id="set-flash" type="checkbox"> Reduce screen flashing</label>
+           </div>
++          <div class="keys" id="key-list"></div>
++          <p class="keynote" id="key-note"></p>
++          <button id="btn-reset-keys">Reset keys</button>
+           <button id="btn-resume">Resume</button>
+         </div>
+       </div>
+@@ -88,6 +97,9 @@ export class Hud {
+     this.q('#btn-continue').addEventListener('click', this.continueRun);
+     this.q('#btn-resume').addEventListener('click', this.resume);
+     this.q('#btn-restart').addEventListener('click', this.restart);
++    this.q('#btn-reset-keys').addEventListener('click', this.resetKeys);
++    this.q('#key-list').addEventListener('click', this.keyClick);
++    this.renderKeys();
+     for (const id of SETTING_INPUTS) this.q(id).addEventListener('input', this.settingsInput);
+   }
+ 
+@@ -113,6 +125,53 @@ export class Hud {
+     this.reduceFlash = s.reduceFlash;
+   }
+ 
++  private resetKeys = (): void => {
++    this.stopListening();
++    this.onResetKeys();
++  };
++
++  private keyClick = (e: Event): void => {
++    const button = (e.target as HTMLElement).closest('button[data-action]') as HTMLElement | null;
++    if (!button) return;
++    this.stopListening();
++    this.listening = button.dataset.action as Action;
++    button.textContent = 'press a key…';
++    button.classList.add('listening');
++    this.q('#key-note').textContent = 'Esc cancels';
++    window.addEventListener('keydown', this.onCapture, true);
++  };
++
++  /** While waiting for a key, swallow it so it never reaches the game. Escape cancels. */
++  private onCapture = (e: KeyboardEvent): void => {
++    e.preventDefault();
++    e.stopPropagation();
++    const action = this.listening;
++    this.stopListening();
++    if (action && e.code !== 'Escape') this.onRebind(action, e.code);
++  };
++
++  private stopListening(): void {
++    if (this.listening === null) return;
++    this.listening = null;
++    window.removeEventListener('keydown', this.onCapture, true);
++    this.q('#key-note').textContent = '';
++    this.renderKeys();
++  }
++
++  /** Show the current layout in the pause menu. `note` explains a swap, e.g. "Pulse now uses Space". */
++  setBindings(b: Bindings, note = ''): void {
++    this.bindings = b;
++    this.renderKeys();
++    this.q('#key-note').textContent = note;
++  }
++
++  private renderKeys(): void {
++    const rows = ACTIONS.map(
++      (a) => `<div class="keyrow"><span>${ACTION_LABELS[a]}</span><button data-action="${a}">${keyLabel(this.bindings[a])}</button></div>`,
++    );
++    this.q('#key-list').innerHTML = rows.join('');
++  }
++
+   private start = (): void => this.onStart();
+   private continueRun = (): void => this.onContinue();
+   private resume = (): void => this.onResume();
+@@ -140,7 +199,10 @@ export class Hud {
+     if (label !== null) this.q('#btn-continue').textContent = label;
+   }
+   showHud(on: boolean): void { this.show('#hud', on); }
+-  showPause(on: boolean): void { this.show('#pause-screen', on); }
++  showPause(on: boolean): void {
++    if (!on) this.stopListening();
++    this.show('#pause-screen', on);
++  }
+ 
+   /** `bestLine` is a second line such as "New best time!" or "Best 1:20.4 · fewest falls 2". */
+   showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = '', unlocked: readonly string[] = []): void {
+@@ -193,6 +255,9 @@ export class Hud {
+     this.q('#btn-continue').removeEventListener('click', this.continueRun);
+     this.q('#btn-resume').removeEventListener('click', this.resume);
+     this.q('#btn-restart').removeEventListener('click', this.restart);
++    this.q('#btn-reset-keys').removeEventListener('click', this.resetKeys);
++    this.q('#key-list').removeEventListener('click', this.keyClick);
++    window.removeEventListener('keydown', this.onCapture, true);
+     for (const id of SETTING_INPUTS) this.q(id).removeEventListener('input', this.settingsInput);
+     this.root.remove();
+   }
+diff --git a/lanternfall/tests/Hud.test.ts b/lanternfall/tests/Hud.test.ts
+new file mode 100644
+index 0000000..85adfc2
+--- /dev/null
++++ b/lanternfall/tests/Hud.test.ts
+@@ -0,0 +1,153 @@
++// @vitest-environment jsdom
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { DEFAULT_SETTINGS } from '../src/core/Settings';
++import { DEFAULT_BINDINGS } from '../src/input/Keybinds';
++import { Hud } from '../src/ui/Hud';
++
++let parent: HTMLElement;
++let hud: Hud;
++
++const $ = <T extends HTMLElement>(sel: string): T => parent.querySelector(sel) as T;
++const press = (code: string): KeyboardEvent => {
++  const e = new KeyboardEvent('keydown', { code, bubbles: true, cancelable: true });
++  window.dispatchEvent(e);
++  return e;
++};
++
++beforeEach(() => {
++  parent = document.createElement('div');
++  document.body.appendChild(parent);
++  hud = new Hud(parent);
++});
++
++afterEach(() => {
++  hud.dispose();
++  parent.remove();
++});
++
++describe('Hud key rebinding', () => {
++  it('lists every action with its current key', () => {
++    const rows = parent.querySelectorAll('#key-list .keyrow');
++    expect(rows.length).toBe(11);
++    expect($('button[data-action="jump"]').textContent).toBe('Space');
++    expect($('button[data-action="turnLeft"]').textContent).toBe('←');
++  });
++
++  it('waits for a key after a click, then reports the rebind', () => {
++    const onRebind = vi.fn();
++    hud.onRebind = onRebind;
++    $('button[data-action="jump"]').click();
++    expect($('button[data-action="jump"]').textContent).toBe('press a key…');
++    press('KeyJ');
++    expect(onRebind).toHaveBeenCalledWith('jump', 'KeyJ');
++  });
++
++  it('swallows the captured key so the game never sees it', () => {
++    const gameSaw = vi.fn();
++    window.addEventListener('keydown', gameSaw);
++    $('button[data-action="pulse"]').click();
++    const e = press('KeyX');
++    window.removeEventListener('keydown', gameSaw);
++    expect(e.defaultPrevented).toBe(true);
++    expect(gameSaw).not.toHaveBeenCalled();
++  });
++
++  it('Escape cancels without rebinding', () => {
++    const onRebind = vi.fn();
++    hud.onRebind = onRebind;
++    $('button[data-action="jump"]').click();
++    press('Escape');
++    expect(onRebind).not.toHaveBeenCalled();
++    expect($('button[data-action="jump"]').textContent).toBe('Space');
++  });
++
++  it('stops listening after one key', () => {
++    const onRebind = vi.fn();
++    hud.onRebind = onRebind;
++    $('button[data-action="jump"]').click();
++    press('KeyJ');
++    press('KeyK');
++    expect(onRebind).toHaveBeenCalledTimes(1);
++  });
++
++  it('setBindings redraws the buttons and shows a note', () => {
++    hud.setBindings({ ...DEFAULT_BINDINGS, jump: 'KeyJ' }, 'Pulse now uses Space.');
++    expect($('button[data-action="jump"]').textContent).toBe('J');
++    expect($('#key-note').textContent).toBe('Pulse now uses Space.');
++  });
++
++  it('hiding the pause screen cancels a pending rebind', () => {
++    const onRebind = vi.fn();
++    hud.onRebind = onRebind;
++    $('button[data-action="jump"]').click();
++    hud.showPause(false);
++    press('KeyJ');
++    expect(onRebind).not.toHaveBeenCalled();
++  });
++
++  it('Reset keys calls back', () => {
++    const onResetKeys = vi.fn();
++    hud.onResetKeys = onResetKeys;
++    $('#btn-reset-keys').click();
++    expect(onResetKeys).toHaveBeenCalledTimes(1);
++  });
++});
++
++describe('Hud settings and screens', () => {
++  it('shows and reads back the new settings', () => {
++    hud.setSettings({ ...DEFAULT_SETTINGS, showHints: false, reduceFlash: true });
++    expect($<HTMLInputElement>('#set-hints').checked).toBe(false);
++    expect($<HTMLInputElement>('#set-flash').checked).toBe(true);
++    const onSettings = vi.fn();
++    hud.onSettings = onSettings;
++    $<HTMLInputElement>('#set-ghost').checked = false;
++    $('#set-ghost').dispatchEvent(new Event('input'));
++    expect(onSettings.mock.calls[0][0]).toMatchObject({ showGhost: false, showHints: false, reduceFlash: true });
++  });
++
++  it('skips the respawn flash when reduce flashing is on', () => {
++    hud.setSettings({ ...DEFAULT_SETTINGS, reduceFlash: true });
++    hud.flash();
++    expect($('#flash').classList.contains('on')).toBe(false);
++    hud.setSettings({ ...DEFAULT_SETTINGS, reduceFlash: false });
++    hud.flash();
++    expect($('#flash').classList.contains('on')).toBe(true);
++  });
++
++  it('Continue button shows its label, and hides on null', () => {
++    expect($('#btn-continue').classList.contains('hidden')).toBe(true);
++    hud.setContinue('Continue (checkpoint 2 of 4)');
++    expect($('#btn-continue').classList.contains('hidden')).toBe(false);
++    expect($('#btn-continue').textContent).toBe('Continue (checkpoint 2 of 4)');
++    hud.setContinue(null);
++    expect($('#btn-continue').classList.contains('hidden')).toBe(true);
++  });
++
++  it('Continue and Begin call their own handlers', () => {
++    const onContinue = vi.fn();
++    const onStart = vi.fn();
++    hud.onContinue = onContinue;
++    hud.onStart = onStart;
++    $('#btn-continue').click();
++    expect(onContinue).toHaveBeenCalledTimes(1);
++    expect(onStart).not.toHaveBeenCalled();
++    $('#btn-start').click();
++    expect(onStart).toHaveBeenCalledTimes(1);
++  });
++
++  it('win screen lists unlocked achievements, or nothing', () => {
++    hud.showWin(true, 61, 2, '', 'Best 1:01.0', ['Flawless', 'Quick feet']);
++    expect($('#win-achievements').textContent).toBe('Unlocked: Flawless, Quick feet');
++    hud.showWin(true, 61, 2, '', 'Best 1:01.0');
++    expect($('#win-achievements').textContent).toBe('');
++  });
++
++  it('title and pause lines show text only when there is something to say', () => {
++    hud.setAchievementProgress(0, 7);
++    expect($('#title-achievements').textContent).toBe('');
++    hud.setAchievementProgress(3, 7);
++    expect($('#title-achievements').textContent).toBe('Achievements 3 of 7');
++    hud.setLifetime('2m played');
++    expect($('#lifetime').textContent).toBe('2m played');
++  });
++});
+diff --git a/lanternfall/tests/Keybinds.test.ts b/lanternfall/tests/Keybinds.test.ts
+new file mode 100644
+index 0000000..27fb28f
+--- /dev/null
++++ b/lanternfall/tests/Keybinds.test.ts
+@@ -0,0 +1,164 @@
++import { describe, expect, it, vi } from 'vitest';
++import { MemoryStore } from '../src/core/storage';
++import {
++  ACTIONS, ACTION_LABELS, Action, BindingStore, DEFAULT_BINDINGS, RESERVED_CODES,
++  isBindableCode, keyLabel, rebind, sanitizeBindings,
++} from '../src/input/Keybinds';
++
++describe('defaults', () => {
++  it('give every action exactly one unique, bindable key and a label', () => {
++    const codes = ACTIONS.map((a) => DEFAULT_BINDINGS[a]);
++    expect(new Set(codes).size).toBe(ACTIONS.length);
++    for (const a of ACTIONS) {
++      expect(isBindableCode(DEFAULT_BINDINGS[a])).toBe(true);
++      expect(ACTION_LABELS[a].length).toBeGreaterThan(3);
++    }
++  });
++
++  it('keep the original layout: WASD, Space, Q, R, arrows', () => {
++    expect(DEFAULT_BINDINGS).toMatchObject({
++      forward: 'KeyW', left: 'KeyA', back: 'KeyS', right: 'KeyD', jump: 'Space', pulse: 'KeyQ', restart: 'KeyR',
++      turnLeft: 'ArrowLeft', turnRight: 'ArrowRight',
++    });
++  });
++});
++
++describe('isBindableCode', () => {
++  it('accepts normal key codes', () => {
++    for (const c of ['KeyZ', 'Space', 'Digit4', 'ArrowUp', 'ShiftLeft', 'Numpad2']) expect(isBindableCode(c)).toBe(true);
++  });
++
++  it('rejects Escape, junk and non-strings', () => {
++    for (const c of ['Escape', '', 'Key W', 'a-b', 'x'.repeat(40), 5, null, undefined, {}]) expect(isBindableCode(c)).toBe(false);
++    expect(RESERVED_CODES.has('Escape')).toBe(true);
++  });
++});
++
++describe('sanitizeBindings', () => {
++  it('returns the defaults for garbage', () => {
++    for (const bad of [null, undefined, 3, 'x', [], {}]) expect(sanitizeBindings(bad)).toEqual(DEFAULT_BINDINGS);
++  });
++
++  it('keeps a valid custom layout', () => {
++    const custom = { ...DEFAULT_BINDINGS, jump: 'KeyJ' };
++    expect(sanitizeBindings(custom)).toEqual(custom);
++  });
++
++  it('replaces a bad entry with its default', () => {
++    expect(sanitizeBindings({ jump: 'Escape' }).jump).toBe('Space');
++    expect(sanitizeBindings({ pulse: 42 }).pulse).toBe('KeyQ');
++  });
++
++  it('resets everything when two actions share a key', () => {
++    const clash = { ...DEFAULT_BINDINGS, jump: 'KeyQ' };
++    expect(sanitizeBindings(clash)).toEqual(DEFAULT_BINDINGS);
++  });
++
++  it('resets everything when a bad entry falls back onto a key another action now uses', () => {
++    const tricky = { ...DEFAULT_BINDINGS, forward: 'KeyA', left: 'Escape' };
++    expect(sanitizeBindings(tricky)).toEqual(DEFAULT_BINDINGS);
++  });
++});
++
++describe('rebind', () => {
++  it('moves an action to a free key', () => {
++    const r = rebind(DEFAULT_BINDINGS, 'jump', 'KeyJ');
++    expect(r?.bindings.jump).toBe('KeyJ');
++    expect(r?.swapped).toBeNull();
++  });
++
++  it('swaps with the action that already owns the key', () => {
++    const r = rebind(DEFAULT_BINDINGS, 'jump', 'KeyQ');
++    expect(r?.bindings.jump).toBe('KeyQ');
++    expect(r?.bindings.pulse).toBe('Space');
++    expect(r?.swapped).toBe('pulse');
++  });
++
++  it('never leaves two actions on one key, whatever you rebind', () => {
++    let b = DEFAULT_BINDINGS;
++    const keys = ['KeyW', 'KeyQ', 'Space', 'KeyA', 'KeyM', 'KeyZ', 'ArrowLeft', 'KeyD'];
++    for (let i = 0; i < 40; i++) {
++      const action = ACTIONS[i % ACTIONS.length] as Action;
++      const r = rebind(b, action, keys[i % keys.length]);
++      if (r) b = r.bindings;
++      expect(new Set(ACTIONS.map((a) => b[a])).size).toBe(ACTIONS.length);
++    }
++  });
++
++  it('is a no-op when the key is unchanged', () => {
++    const r = rebind(DEFAULT_BINDINGS, 'jump', 'Space');
++    expect(r?.bindings).toBe(DEFAULT_BINDINGS);
++    expect(r?.swapped).toBeNull();
++  });
++
++  it('refuses Escape and invalid codes', () => {
++    expect(rebind(DEFAULT_BINDINGS, 'jump', 'Escape')).toBeNull();
++    expect(rebind(DEFAULT_BINDINGS, 'jump', 'not a key')).toBeNull();
++  });
++
++  it('does not change the bindings it was given', () => {
++    const before = { ...DEFAULT_BINDINGS };
++    rebind(DEFAULT_BINDINGS, 'jump', 'KeyQ');
++    expect(DEFAULT_BINDINGS).toEqual(before);
++  });
++});
++
++describe('keyLabel', () => {
++  it('shortens letters, digits and arrows', () => {
++    expect(keyLabel('KeyW')).toBe('W');
++    expect(keyLabel('Digit7')).toBe('7');
++    expect(keyLabel('ArrowLeft')).toBe('←');
++    expect(keyLabel('ArrowDown')).toBe('↓');
++    expect(keyLabel('Numpad3')).toBe('Num 3');
++  });
++
++  it('spaces out left/right modifiers and leaves others alone', () => {
++    expect(keyLabel('ShiftLeft')).toBe('Shift Left');
++    expect(keyLabel('Space')).toBe('Space');
++    expect(keyLabel('Tab')).toBe('Tab');
++  });
++});
++
++describe('BindingStore', () => {
++  it('starts with the defaults', () => {
++    expect(new BindingStore(new MemoryStore()).get()).toEqual(DEFAULT_BINDINGS);
++  });
++
++  it('saves a rebind and reloads it', () => {
++    const mem = new MemoryStore();
++    new BindingStore(mem).rebind('jump', 'KeyJ');
++    expect(new BindingStore(mem).get().jump).toBe('KeyJ');
++  });
++
++  it('survives corrupt saved data', () => {
++    const mem = new MemoryStore();
++    mem.setItem('lanternfall.keys', '{nope');
++    expect(new BindingStore(mem).get()).toEqual(DEFAULT_BINDINGS);
++  });
++
++  it('notifies listeners on change, not on a no-op, and stops after unsubscribe', () => {
++    const s = new BindingStore(new MemoryStore());
++    const fn = vi.fn();
++    const off = s.onChange(fn);
++    s.rebind('jump', 'KeyJ');
++    expect(fn).toHaveBeenCalledTimes(1);
++    s.rebind('jump', 'KeyJ');
++    expect(fn).toHaveBeenCalledTimes(1);
++    off();
++    s.rebind('jump', 'KeyK');
++    expect(fn).toHaveBeenCalledTimes(1);
++  });
++
++  it('reset restores the defaults', () => {
++    const s = new BindingStore(new MemoryStore());
++    s.rebind('jump', 'KeyJ');
++    s.reset();
++    expect(s.get()).toEqual(DEFAULT_BINDINGS);
++  });
++
++  it('returns null for a refused key and changes nothing', () => {
++    const s = new BindingStore(new MemoryStore());
++    expect(s.rebind('jump', 'Escape')).toBeNull();
++    expect(s.get().jump).toBe('Space');
++  });
++});
+-- 
+2.43.0
+

@@ -1,0 +1,360 @@
+From 1079d964d5dd8cc9aeb09f9e1da2312ef482acf9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 10:50:12 +0000
+Subject: [PATCH 09/18] Add Continue: save furthest checkpoint and resume from
+ it
+
+Continued runs are flagged and never write best-time records, since they
+skip the earlier part of the tower. Starting fresh or finishing clears
+the saved checkpoint.
+---
+ lanternfall/src/core/Game.ts       | 67 +++++++++++++++++++++----
+ lanternfall/src/core/Progress.ts   | 60 +++++++++++++++++++++++
+ lanternfall/src/ui/Hud.ts          | 11 +++++
+ lanternfall/tests/Progress.test.ts | 79 ++++++++++++++++++++++++++++++
+ 4 files changed, 207 insertions(+), 10 deletions(-)
+ create mode 100644 lanternfall/src/core/Progress.ts
+ create mode 100644 lanternfall/tests/Progress.test.ts
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index 2cb3c0d..2576c61 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -17,6 +17,7 @@ import {
+ import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
+ import { EventBus } from './EventBus';
+ import { FallLog } from './FallLog';
++import { ProgressStore } from './Progress';
+ import { Records, formatTime } from './Records';
+ import { SettingsStore } from './Settings';
+ import { browserStore } from './storage';
+@@ -59,12 +60,14 @@ export class Game {
+   private readonly resizeObserver: ResizeObserver;
+   private readonly settings = new SettingsStore(browserStore());
+   private readonly records = new Records(browserStore());
++  private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
+   private unsubscribeSettings: () => void = () => {};
+   private readonly touch: TouchControls | null;
+ 
+   private respawnPoint: { x: number; y: number; z: number } = { ...SPAWN };
+   private activeCheckpoint: string | null = null;
+-  private stats = { time: 0, falls: 0 };
++  /** `continued` runs started from a saved checkpoint, so their times are not comparable and never become records. */
++  private stats = { time: 0, falls: 0, continued: false };
+   private accumulator = 0;
+   /** Simulation clock for moving platforms: advances only while playing. */
+   private moverTime = 0;
+@@ -94,13 +97,15 @@ export class Game {
+ 
+     this.hud = new Hud(container);
+     this.touch = TouchControls.isSupported() ? new TouchControls(container, () => this.togglePause()) : null;
+-    this.hud.onStart = () => this.begin();
++    this.hud.onStart = () => this.startFresh();
++    this.hud.onContinue = () => this.continueRun();
+     this.hud.onResume = () => this.togglePause();
+     this.hud.onRestart = () => this.restart();
+     this.hud.onSettings = (patch) => this.settings.set(patch);
+     this.unsubscribeSettings = this.settings.onChange((v) => this.applySettings(v));
+     this.applySettings(this.settings.get());
+     this.hud.setSettings(this.settings.get());
++    this.refreshContinue();
+     this.hud.showTitle(true);
+ 
+     this.resizeObserver = new ResizeObserver(() => this.resize());
+@@ -131,6 +136,41 @@ export class Game {
+   }
+ 
+   // --- flow ------------------------------------------------------------------
++  /** Begin from the very start. Any saved progress is dropped, because a new run replaces it. */
++  private startFresh(): void {
++    this.progress.clear();
++    this.refreshContinue();
++    this.begin();
++  }
++
++  /** Resume at the furthest checkpoint reached. Such a run is marked `continued` and never saves a record. */
++  private continueRun(): void {
++    const index = this.progress.furthestCheckpoint;
++    const c = CHECKPOINTS[index];
++    if (!c) {
++      this.startFresh();
++      return;
++    }
++    this.activeCheckpoint = c.id;
++    this.respawnPoint = respawnPosition(c);
++    this.level.setActiveCheckpoint(c.id);
++    this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
++    this.applyCheckpointObjective(c.id);
++    this.stats = { time: 0, falls: 0, continued: true };
++    this.placePlayer();
++    this.begin();
++  }
++
++  private refreshContinue(): void {
++    const i = this.progress.furthestCheckpoint;
++    this.hud.setContinue(this.progress.canContinue ? `Continue (checkpoint ${i + 1} of ${CHECKPOINTS.length})` : null);
++  }
++
++  private applyCheckpointObjective(id: string): void {
++    if (id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
++    if (id === 'C3' || id === 'C4') this.hud.setObjective(OBJ_GALLERY);
++  }
++
+   private begin(): void {
+     this.audio.unlock(); // browsers require a user click before audio can play
+     if (this.state.transition('playing')) {
+@@ -157,7 +197,9 @@ export class Game {
+     this.beaconsActive.clear();
+     this.hud.setObjective(OBJ_START);
+     this.hud.setCheckpoint('start');
+-    this.stats = { time: 0, falls: 0 };
++    this.stats = { time: 0, falls: 0, continued: false };
++    this.progress.clear();
++    this.refreshContinue();
+     this.moverTime = 0;
+     this.fallLog.reset();
+     this.placePlayer();
+@@ -192,11 +234,16 @@ export class Game {
+     const p = this.player.body.pos;
+     this.sparkles.burst(p.x, p.y, p.z, 120, GOLD, 5, 4);
+     const worst = this.fallLog.worst();
+-    const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
+-    const { bestTime, fewestFalls } = out.record;
+-    let bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
+-    if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
+-    else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
++    this.progress.clear();
++    this.refreshContinue();
++    let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
++    if (!this.stats.continued) {
++      const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
++      const { bestTime, fewestFalls } = out.record;
++      bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
++      if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
++      else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
++    }
+     this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine);
+   }
+ 
+@@ -334,8 +381,8 @@ export class Game {
+     this.sparkles.burst(c.x, c.y + 1, c.z, 40, GOLD, 3, 3);
+     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
+     this.hud.toast('Checkpoint reached');
+-    if (c.id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
+-    if (c.id === 'C3') this.hud.setObjective(OBJ_GALLERY);
++    if (this.progress.reach(index)) this.refreshContinue();
++    this.applyCheckpointObjective(c.id);
+   }
+ 
+   /** A pulse reached a crystal: wake it and make its bridge permanently solid. */
+diff --git a/lanternfall/src/core/Progress.ts b/lanternfall/src/core/Progress.ts
+new file mode 100644
+index 0000000..aa5ced1
+--- /dev/null
++++ b/lanternfall/src/core/Progress.ts
+@@ -0,0 +1,60 @@
++import { KeyValueStore, readJson } from './storage';
++
++/** Stored shape. `furthest` is an index into CHECKPOINTS, or -1 when no checkpoint has been reached. */
++interface SavedProgress {
++  furthest: number;
++}
++
++/**
++ * Remembers how far through the tower the player has got, so the title screen can offer "Continue".
++ * It only ever moves forward during a run; finishing or restarting clears it.
++ */
++export class ProgressStore {
++  private furthest: number;
++
++  constructor(
++    private readonly store: KeyValueStore,
++    private readonly checkpointCount: number,
++    private readonly key = 'lanternfall.progress',
++  ) {
++    this.furthest = ProgressStore.sanitize(readJson(store, key), checkpointCount);
++  }
++
++  /** Turn anything stored (old saves, hand-edited JSON, a tower that changed size) into a valid index. */
++  static sanitize(raw: unknown, checkpointCount: number): number {
++    if (typeof raw !== 'object' || raw === null) return -1;
++    const value = (raw as Partial<SavedProgress>).furthest;
++    if (typeof value !== 'number' || !Number.isInteger(value)) return -1;
++    return value >= 0 && value < checkpointCount ? value : -1;
++  }
++
++  /** Index of the furthest checkpoint reached, or -1. */
++  get furthestCheckpoint(): number {
++    return this.furthest;
++  }
++
++  get canContinue(): boolean {
++    return this.furthest >= 0;
++  }
++
++  /** Call when a checkpoint is reached. Returns true if this is new progress. */
++  reach(index: number): boolean {
++    if (!Number.isInteger(index) || index < 0 || index >= this.checkpointCount) return false;
++    if (index <= this.furthest) return false;
++    this.furthest = index;
++    this.save();
++    return true;
++  }
++
++  /** Forget everything (run finished, or the player chose to start over). */
++  clear(): void {
++    if (this.furthest === -1) return;
++    this.furthest = -1;
++    this.save();
++  }
++
++  private save(): void {
++    const data: SavedProgress = { furthest: this.furthest };
++    this.store.setItem(this.key, JSON.stringify(data));
++  }
++}
+diff --git a/lanternfall/src/ui/Hud.ts b/lanternfall/src/ui/Hud.ts
+index 44737c4..f27ca2e 100644
+--- a/lanternfall/src/ui/Hud.ts
++++ b/lanternfall/src/ui/Hud.ts
+@@ -3,6 +3,7 @@ import { SETTING_LIMITS, Settings } from '../core/Settings';
+ /** All on-screen text and buttons. Plain DOM (no framework) so it is easy to read and change. */
+ export class Hud {
+   onStart: () => void = () => {};
++  onContinue: () => void = () => {};
+   onResume: () => void = () => {};
+   onRestart: () => void = () => {};
+   onSettings: (patch: Partial<Settings>) => void = () => {};
+@@ -29,6 +30,7 @@ export class Hud {
+             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
+           </ul>
+           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
++          <button id="btn-continue" class="hidden">Continue</button>
+           <button id="btn-start">Begin</button>
+         </div>
+       </div>
+@@ -73,6 +75,7 @@ export class Hud {
+     parent.appendChild(this.root);
+ 
+     this.q('#btn-start').addEventListener('click', this.start);
++    this.q('#btn-continue').addEventListener('click', this.continueRun);
+     this.q('#btn-resume').addEventListener('click', this.resume);
+     this.q('#btn-restart').addEventListener('click', this.restart);
+     for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).addEventListener('input', this.settingsInput);
+@@ -94,6 +97,7 @@ export class Hud {
+   }
+ 
+   private start = (): void => this.onStart();
++  private continueRun = (): void => this.onContinue();
+   private resume = (): void => this.onResume();
+   private restart = (): void => this.onRestart();
+ 
+@@ -102,6 +106,12 @@ export class Hud {
+   }
+ 
+   showTitle(on: boolean): void { this.show('#title-screen', on); }
++
++  /** Show the Continue button with a label such as "Continue (checkpoint 2 of 4)", or hide it with null. */
++  setContinue(label: string | null): void {
++    this.show('#btn-continue', label !== null);
++    if (label !== null) this.q('#btn-continue').textContent = label;
++  }
+   showHud(on: boolean): void { this.show('#hud', on); }
+   showPause(on: boolean): void { this.show('#pause-screen', on); }
+ 
+@@ -151,6 +161,7 @@ export class Hud {
+     window.clearTimeout(this.toastTimer);
+     window.clearTimeout(this.flashTimer);
+     this.q('#btn-start').removeEventListener('click', this.start);
++    this.q('#btn-continue').removeEventListener('click', this.continueRun);
+     this.q('#btn-resume').removeEventListener('click', this.resume);
+     this.q('#btn-restart').removeEventListener('click', this.restart);
+     for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).removeEventListener('input', this.settingsInput);
+diff --git a/lanternfall/tests/Progress.test.ts b/lanternfall/tests/Progress.test.ts
+new file mode 100644
+index 0000000..c8306e8
+--- /dev/null
++++ b/lanternfall/tests/Progress.test.ts
+@@ -0,0 +1,79 @@
++import { describe, expect, it } from 'vitest';
++import { ProgressStore } from '../src/core/Progress';
++import { MemoryStore } from '../src/core/storage';
++
++const COUNT = 4;
++
++describe('ProgressStore.sanitize', () => {
++  it('returns -1 for missing or malformed data', () => {
++    for (const bad of [null, undefined, 3, 'x', [], {}, { furthest: 'a' }, { furthest: 1.5 }, { furthest: NaN }]) {
++      expect(ProgressStore.sanitize(bad, COUNT)).toBe(-1);
++    }
++  });
++
++  it('rejects indices outside the tower', () => {
++    expect(ProgressStore.sanitize({ furthest: -2 }, COUNT)).toBe(-1);
++    expect(ProgressStore.sanitize({ furthest: COUNT }, COUNT)).toBe(-1);
++    expect(ProgressStore.sanitize({ furthest: 99 }, COUNT)).toBe(-1);
++  });
++
++  it('keeps a valid index', () => {
++    expect(ProgressStore.sanitize({ furthest: 0 }, COUNT)).toBe(0);
++    expect(ProgressStore.sanitize({ furthest: COUNT - 1 }, COUNT)).toBe(COUNT - 1);
++  });
++});
++
++describe('ProgressStore', () => {
++  it('starts with nothing to continue', () => {
++    const p = new ProgressStore(new MemoryStore(), COUNT);
++    expect(p.canContinue).toBe(false);
++    expect(p.furthestCheckpoint).toBe(-1);
++  });
++
++  it('only moves forward', () => {
++    const p = new ProgressStore(new MemoryStore(), COUNT);
++    expect(p.reach(1)).toBe(true);
++    expect(p.reach(0)).toBe(false);
++    expect(p.reach(1)).toBe(false);
++    expect(p.reach(2)).toBe(true);
++    expect(p.furthestCheckpoint).toBe(2);
++  });
++
++  it('ignores invalid indices without changing anything', () => {
++    const p = new ProgressStore(new MemoryStore(), COUNT);
++    p.reach(1);
++    expect(p.reach(-1)).toBe(false);
++    expect(p.reach(COUNT)).toBe(false);
++    expect(p.reach(0.5)).toBe(false);
++    expect(p.furthestCheckpoint).toBe(1);
++  });
++
++  it('persists across instances sharing a store', () => {
++    const store = new MemoryStore();
++    new ProgressStore(store, COUNT).reach(2);
++    const again = new ProgressStore(store, COUNT);
++    expect(again.canContinue).toBe(true);
++    expect(again.furthestCheckpoint).toBe(2);
++  });
++
++  it('clear forgets progress and persists that', () => {
++    const store = new MemoryStore();
++    const p = new ProgressStore(store, COUNT);
++    p.reach(3);
++    p.clear();
++    expect(p.canContinue).toBe(false);
++    expect(new ProgressStore(store, COUNT).canContinue).toBe(false);
++  });
++
++  it('survives corrupt stored JSON', () => {
++    const store = new MemoryStore();
++    store.setItem('lanternfall.progress', '{not json');
++    expect(new ProgressStore(store, COUNT).canContinue).toBe(false);
++  });
++
++  it('drops saved progress that no longer fits a smaller tower', () => {
++    const store = new MemoryStore();
++    new ProgressStore(store, 6).reach(5);
++    expect(new ProgressStore(store, 4).canContinue).toBe(false);
++  });
++});
+-- 
+2.43.0
+

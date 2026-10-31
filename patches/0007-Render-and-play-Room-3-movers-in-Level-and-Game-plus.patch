@@ -1,0 +1,471 @@
+From 1a553ea0122712cde3563f4f5aa97613f18d91b5 Mon Sep 17 00:00:00 2001
+From: obig20 <obig20@example.com>
+Date: Fri, 30 Oct 2026 18:35:36 +0000
+Subject: [PATCH 07/18] Render and play Room 3: movers in Level and Game, plus
+ a timing-window bot test
+
+Level builds and slides mover meshes (dark movers use the hidden-platform look); Game keeps
+a simulation clock, applies carry/push-out each physics step, and lights dark movers with the
+same lantern rule. tests/helpers/room3Sim.ts is a bot that tries every start moment in a
+mover's cycle; each hop must succeed from at least 25% of them. M2 phase set to 1 from that data.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ lanternfall/src/core/Game.ts          | 38 ++++++++----
+ lanternfall/src/world/Level.ts        | 61 ++++++++++++++++---
+ lanternfall/tests/Room3.test.ts       | 86 ++++++++++++++++++++++++++
+ lanternfall/tests/helpers/room3Sim.ts | 88 +++++++++++++++++++++++++++
+ 4 files changed, 253 insertions(+), 20 deletions(-)
+ create mode 100644 lanternfall/tests/Room3.test.ts
+ create mode 100644 lanternfall/tests/helpers/room3Sim.ts
+
+diff --git a/lanternfall/src/core/Game.ts b/lanternfall/src/core/Game.ts
+index c793fba..2cb3c0d 100644
+--- a/lanternfall/src/core/Game.ts
++++ b/lanternfall/src/core/Game.ts
+@@ -12,8 +12,9 @@ import { Level } from '../world/Level';
+ import { Lantern, RevealTracker } from '../world/LightReveal';
+ import {
+   BEACONS, BeaconDef, CHECKPOINTS, GOAL, KILL_Y, PLATFORMS, SPAWN, TriggerDef,
+-  inTrigger, platformById, platformUnder, pulseReaches, respawnPosition,
++  MOVERS, inTrigger, platformById, platformUnder, pulseReaches, respawnPosition,
+ } from '../world/LevelData';
++import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
+ import { EventBus } from './EventBus';
+ import { FallLog } from './FallLog';
+ import { Records, formatTime } from './Records';
+@@ -34,7 +35,8 @@ const CHARACTER_ASSETS = {
+ const RUN_ID = 'tower';
+ const OBJ_START = 'Reach the golden gate';
+ const OBJ_BEACON = 'Find the crystal and wake it with a pulse (Q)';
+-const OBJ_BRIDGE = 'Cross the light bridge to the gate';
++const OBJ_BRIDGE = 'Cross the light bridge';
++const OBJ_GALLERY = 'Ride the drifting stones to the golden gate';
+ 
+ /** Owns the renderer and the main loop; wires every system together. */
+ export class Game {
+@@ -64,6 +66,8 @@ export class Game {
+   private activeCheckpoint: string | null = null;
+   private stats = { time: 0, falls: 0 };
+   private accumulator = 0;
++  /** Simulation clock for moving platforms: advances only while playing. */
++  private moverTime = 0;
+   private lastTime = -1;
+   private elapsed = 0;
+   private jumpQueued = false;
+@@ -154,6 +158,7 @@ export class Game {
+     this.hud.setObjective(OBJ_START);
+     this.hud.setCheckpoint('start');
+     this.stats = { time: 0, falls: 0 };
++    this.moverTime = 0;
+     this.fallLog.reset();
+     this.placePlayer();
+     if (this.state.transition('playing')) this.hud.showWin(false);
+@@ -228,10 +233,10 @@ export class Game {
+     const bodyPos = this.player.body.pos;
+     const target = new THREE.Vector3(bodyPos.x, bodyPos.y, bodyPos.z);
+     this.player.updateVisual(dt, this.elapsed, this.lantern.radius, this.lantern.pulsing);
+-    this.level.update(dt, this.elapsed, this.reveal);
++    this.level.update(dt, this.elapsed, this.reveal, this.moverTime);
+     this.sparkles.update(dt);
+     this.env.update(target, this.elapsed);
+-    this.rig.update(dt, target, this.level.solids(this.reveal));
++    this.rig.update(dt, target, [...this.level.solids(this.reveal), ...this.level.moverSolids(this.reveal, this.moverTime)]);
+     this.hud.setPulse(this.lantern.charge, this.lantern.pulsing);
+ 
+     this.renderer.render(this.scene, this.camera);
+@@ -262,12 +267,17 @@ export class Game {
+     }
+ 
+     // 2. Which hidden platforms does the light reach? (rules live in LightReveal.ts)
+-    const change = this.reveal.update(dt, this.level.hidden, this.player.lanternPos, this.lantern.radius);
++    const clockBefore = this.moverTime;
++    this.moverTime += dt;
++    const change = this.reveal.update(dt, this.level.hiddenNow(this.moverTime), this.player.lanternPos, this.lantern.radius);
+     for (const id of change.revealed) {
+-      const def = platformById(id);
++      const mover = MOVERS.find((m) => m.id === id);
++      const spot = mover ? moverTop(mover, this.moverTime) : null;
++      const def = spot ? null : platformById(id);
+       this.level.pop(id);
+       this.audio.reveal();
+-      this.sparkles.burst(def.cx, def.topY + 0.3, def.cz, 22, GOLD, 2, 2.5);
++      if (spot) this.sparkles.burst(spot.x, spot.topY + 0.3, spot.z, 22, GOLD, 2, 2.5);
++      else if (def) this.sparkles.burst(def.cx, def.topY + 0.3, def.cz, 22, GOLD, 2, 2.5);
+     }
+ 
+     // 3. Movement relative to the camera
+@@ -279,10 +289,12 @@ export class Game {
+     const tz = this.touch?.moveZ ?? 0;
+     const ix = (this.input.down('KeyD') ? 1 : 0) - (this.input.down('KeyA') ? 1 : 0) + pad.moveX + tx;
+     const iz = (this.input.down('KeyW') ? 1 : 0) - (this.input.down('KeyS') ? 1 : 0) + pad.moveZ + tz;
++    // Moving platforms: carry the rider, push the player out of anything that slid into them.
++    const movers = applyMovers(body, MOVERS, clockBefore, this.moverTime, (id) => this.reveal.isSolid(id) || !this.level.isHiddenMover(id));
+     const ev = body.step(
+       dt,
+       { moveX: r.x * ix + f.x * iz, moveZ: r.z * ix + f.z * iz, jumpPressed: this.jumpQueued },
+-      this.level.solids(this.reveal),
++      [...this.level.solids(this.reveal), ...movers],
+     );
+     this.jumpQueued = false;
+     if (ev.jumped) {
+@@ -297,7 +309,8 @@ export class Game {
+ 
+     // Remember the last platform we stood on (for the "toughest jump" stat) and play footsteps.
+     if (body.grounded) {
+-      this.lastPlatform = platformUnder({ x: body.pos.x, y: body.feetY, z: body.pos.z }, PLATFORMS) ?? this.lastPlatform;
++      const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
++      this.lastPlatform = platformUnder(feet, PLATFORMS) ?? moverUnder(feet, MOVERS, this.moverTime) ?? this.lastPlatform;
+       this.stepTimer -= dt;
+       if (this.stepTimer <= 0 && Math.hypot(body.vel.x, body.vel.z) > 2) {
+         this.audio.step();
+@@ -306,9 +319,9 @@ export class Game {
+     }
+ 
+     // 4. Checkpoints, goal, falling
+-    const feet = { x: body.pos.x, y: body.feetY, z: body.pos.z };
+-    CHECKPOINTS.forEach((c, i) => this.tryCheckpoint(c, i, feet));
+-    if (inTrigger(feet, GOAL)) this.win();
++    const feetNow = { x: body.pos.x, y: body.feetY, z: body.pos.z };
++    CHECKPOINTS.forEach((c, i) => this.tryCheckpoint(c, i, feetNow));
++    if (inTrigger(feetNow, GOAL)) this.win();
+     else if (body.pos.y < KILL_Y) this.respawn(true);
+   }
+ 
+@@ -322,6 +335,7 @@ export class Game {
+     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
+     this.hud.toast('Checkpoint reached');
+     if (c.id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
++    if (c.id === 'C3') this.hud.setObjective(OBJ_GALLERY);
+   }
+ 
+   /** A pulse reached a crystal: wake it and make its bridge permanently solid. */
+diff --git a/lanternfall/src/world/Level.ts b/lanternfall/src/world/Level.ts
+index 35a2897..223a24f 100644
+--- a/lanternfall/src/world/Level.ts
++++ b/lanternfall/src/world/Level.ts
+@@ -2,7 +2,8 @@ import * as THREE from 'three';
+ import { disposeObject } from '../core/dispose';
+ import { Box } from '../physics/aabb';
+ import { HiddenPlatform, RevealTracker } from './LightReveal';
+-import { BEACONS, CHECKPOINTS, GOAL, PLATFORMS, PlatformDef, PLATFORM_THICKNESS, platformBox } from './LevelData';
++import { BEACONS, CHECKPOINTS, GOAL, MOVERS, MoverDef, PLATFORMS, PlatformDef, PLATFORM_THICKNESS, platformBox } from './LevelData';
++import { moverBox, moverTop } from './MovingPlatform';
+ 
+ const STONE = 0xcdb9a3; // warm sandstone: stands out against the cool violet world
+ const MOSS = 0x56d4a4;
+@@ -16,6 +17,13 @@ interface HiddenView {
+   pop: number;
+ }
+ 
++interface MoverView {
++  def: MoverDef;
++  group: THREE.Group;
++  /** Dotted outline of a hidden mover (null for visible ones). */
++  ghost: THREE.LineSegments | null;
++}
++
+ interface CheckpointView {
+   id: string;
+   flag: THREE.MeshStandardMaterial;
+@@ -30,7 +38,7 @@ interface BeaconView {
+   baseY: number;
+ }
+ 
+-/** Builds the meshes for Room 1 from LevelData and animates them. Collision is NOT done here. */
++/** Builds the meshes for every room from LevelData and animates them. Collision is NOT done here. */
+ export class Level {
+   readonly group = new THREE.Group();
+   readonly hidden: HiddenPlatform[];
+@@ -38,6 +46,7 @@ export class Level {
+   private readonly hiddenViews = new Map<string, HiddenView>();
+   private readonly checkpoints: CheckpointView[] = [];
+   private readonly beacons: BeaconView[] = [];
++  private readonly moverViews: MoverView[] = [];
+   private readonly goalRing: THREE.Mesh;
+   private readonly goalBeam: THREE.Mesh;
+   private readonly goalPortal: THREE.Mesh;
+@@ -50,6 +59,7 @@ export class Level {
+       if (def.hidden) this.buildHidden(def);
+       else this.buildSolid(def);
+     }
++    for (const m of MOVERS) this.buildMover(m);
+     for (const c of CHECKPOINTS) this.buildCheckpoint(c.id, c.x, c.y, c.z);
+     for (const b of BEACONS) this.buildBeacon(b.id, b.x, b.y, b.z);
+ 
+@@ -74,7 +84,22 @@ export class Level {
+     this.group.add(this.goalRing, this.goalPortal, this.goalBeam, goalLight);
+   }
+ 
+-  /** Boxes the player can currently collide with. */
++  /** Hidden platforms and hidden movers, with each mover's box at time `t`. This is what the lantern tests against. */
++  hiddenNow(t: number): HiddenPlatform[] {
++    const movers = MOVERS.filter((m) => m.hidden).map((m) => ({ id: m.id, box: moverBox(m, t) }));
++    return [...this.hidden, ...movers];
++  }
++
++  isHiddenMover(id: string): boolean {
++    return MOVERS.some((m) => m.id === id && m.hidden);
++  }
++
++  /** Boxes of the movers the player can stand on at time `t` (hidden ones only while lit). */
++  moverSolids(reveal: RevealTracker, t: number): Box[] {
++    return MOVERS.filter((m) => !m.hidden || reveal.isSolid(m.id)).map((m) => moverBox(m, t));
++  }
++
++  /** Boxes the player can currently collide with (everything except movers, see moverSolids). */
+   solids(reveal: RevealTracker): Box[] {
+     const out = [...this.staticBoxes];
+     for (const h of this.hidden) if (reveal.isSolid(h.id)) out.push(h.box);
+@@ -108,7 +133,7 @@ export class Level {
+     }
+   }
+ 
+-  update(dt: number, time: number, reveal: RevealTracker): void {
++  update(dt: number, time: number, reveal: RevealTracker, moverTime = 0): void {
+     for (const b of this.beacons) {
+       b.crystal.rotation.y = time * 1.1;
+       b.crystal.position.y = b.baseY + Math.sin(time * 1.8) * 0.12;
+@@ -125,6 +150,11 @@ export class Level {
+       v.group.scale.y = 1 + v.pop * 0.35;
+       (v.ghost.material as THREE.LineBasicMaterial).opacity = vis > 0.5 ? 0 : 0.2 + Math.sin(time * 2.5) * 0.06;
+     }
++    for (const v of this.moverViews) {
++      const c = moverTop(v.def, moverTime);
++      v.group.position.set(c.x, c.topY, c.z);
++      v.ghost?.position.set(c.x, c.topY - 0.04, c.z);
++    }
+     this.goalRing.rotation.y = time * 0.9;
+     const bob = GOAL.y + 2.3 + Math.sin(time * 1.6) * 0.15;
+     this.goalRing.position.y = bob;
+@@ -152,14 +182,27 @@ export class Level {
+     return g;
+   }
+ 
+-  private buildSolid(def: PlatformDef): void {
++  /** A mover is built like a normal platform at its start point; update() slides it along its path. */
++  private buildMover(m: MoverDef): void {
++    const def: PlatformDef = { id: m.id, hidden: m.hidden, cx: m.from.x, topY: m.from.topY, cz: m.from.z, w: m.w, d: m.d, locked: false };
++    if (m.hidden) {
++      const view = this.buildHidden(def);
++      this.moverViews.push({ def: m, group: view.group, ghost: view.ghost });
++    } else {
++      this.moverViews.push({ def: m, group: this.buildSolid(def), ghost: null });
++    }
++  }
++
++  private buildSolid(def: PlatformDef): THREE.Group {
+     const body = new THREE.MeshStandardMaterial({ color: STONE, flatShading: true, roughness: 0.95 });
+     // A little self-glow keeps the walkable top readable even in shadow.
+     const plate = new THREE.MeshStandardMaterial({ color: MOSS, emissive: 0x1f6b50, emissiveIntensity: 0.35, flatShading: true, roughness: 0.9 });
+-    this.group.add(this.slab(def, body, plate));
++    const group = this.slab(def, body, plate);
++    this.group.add(group);
++    return group;
+   }
+ 
+-  private buildHidden(def: PlatformDef): void {
++  private buildHidden(def: PlatformDef): HiddenView {
+     const body = new THREE.MeshStandardMaterial({ color: 0xc9b6ff, emissive: GOLD, emissiveIntensity: 0.2, flatShading: true, transparent: true, opacity: 0 });
+     const plate = new THREE.MeshStandardMaterial({ color: GOLD, emissive: GOLD, emissiveIntensity: 0.5, flatShading: true, transparent: true, opacity: 0 });
+     const group = this.slab(def, body, plate);
+@@ -172,7 +215,9 @@ export class Level {
+     );
+     edges.position.set(def.cx, def.topY - 0.04, def.cz);
+     this.group.add(group, edges);
+-    this.hiddenViews.set(def.id, { group, plate, body, ghost: edges, pop: 0 });
++    const view: HiddenView = { group, plate, body, ghost: edges, pop: 0 };
++    this.hiddenViews.set(def.id, view);
++    return view;
+   }
+ 
+   /** A floating crystal on a small pedestal. Dim until a pulse wakes it. */
+diff --git a/lanternfall/tests/Room3.test.ts b/lanternfall/tests/Room3.test.ts
+new file mode 100644
+index 0000000..68b189c
+--- /dev/null
++++ b/lanternfall/tests/Room3.test.ts
+@@ -0,0 +1,86 @@
++import { describe, expect, it } from 'vitest';
++import { PHYSICS } from '../src/physics/PlayerBody';
++import { MOVERS, PLATFORMS, ROUTE_3, platformBox } from '../src/world/LevelData';
++import { cycleLength, moverBox, moverTop } from '../src/world/MovingPlatform';
++import { overlaps } from '../src/physics/aabb';
++import { spotOf, windowFraction } from './helpers/room3Sim';
++
++const hops: Array<[string, string]> = ROUTE_3.slice(0, -1).map((id, i) => [id, ROUTE_3[i + 1]]);
++
++describe('Room 3 layout', () => {
++  it('every route entry is a real platform or mover, with no id used twice', () => {
++    const ids = [...PLATFORMS.map((p) => p.id), ...MOVERS.map((m) => m.id)];
++    expect(new Set(ids).size).toBe(ids.length);
++    for (const id of ROUTE_3) expect(ids.includes(id)).toBe(true);
++    expect(ROUTE_3[0]).toBe('G2');
++    expect(ROUTE_3[ROUTE_3.length - 1]).toBe('G3');
++  });
++
++  it('movers never pass through a static platform at any moment of their cycle', () => {
++    const statics = PLATFORMS.map(platformBox);
++    for (const m of MOVERS) {
++      for (let t = 0; t < 20; t += 0.25) {
++        for (const s of statics) expect(overlaps(moverBox(m, t), s)).toBe(false);
++      }
++    }
++  });
++
++  it('movers stay on their line: sideways movers keep their height, the lift keeps its x and z', () => {
++    for (const m of MOVERS) {
++      for (let t = 0; t < 12; t += 0.5) {
++        const c = moverTop(m, t);
++        if (m.from.topY === m.to.topY) expect(c.topY).toBe(m.from.topY);
++        if (m.from.x === m.to.x && m.from.z === m.to.z) {
++          expect(c.x).toBe(m.from.x);
++          expect(c.z).toBe(m.from.z);
++        }
++      }
++    }
++  });
++
++  /** Height of a route entry for a given hop: the lift is entered at the bottom of its ride and left from the top. */
++  const V1 = MOVERS.find((m) => m.id === 'V1')!;
++  const heightFor = (id: string, role: 'source' | 'target'): number => {
++    if (id === 'V1') return role === 'target' ? V1.from.topY : V1.to.topY;
++    return spotOf(id, 0).topY;
++  };
++
++  it('every step up along the route is within what a jump can clear', () => {
++    const maxRise = PHYSICS.jumpSpeed ** 2 / (2 * PHYSICS.gravity);
++    for (const [a, b] of hops) {
++      const rise = heightFor(b, 'target') - heightFor(a, 'source');
++      expect(rise).toBeLessThan(maxRise - 0.5);
++    }
++  });
++
++  it('the lift is mandatory: the gate is too high to jump to from the rest stop or the bottom of the lift', () => {
++    const maxRise = PHYSICS.jumpSpeed ** 2 / (2 * PHYSICS.gravity);
++    const g3 = spotOf('G3', 0).topY;
++    expect(g3 - spotOf('R3a', 0).topY).toBeGreaterThan(maxRise);
++    expect(g3 - V1.from.topY).toBeGreaterThan(maxRise);
++  });
++
++  it('the lift is long enough to be worth waiting for but short enough to wait out', () => {
++    expect(V1.to.topY - V1.from.topY).toBeGreaterThan(2);
++    expect(cycleLength(V1)).toBeLessThan(10);
++  });
++});
++
++describe('Room 3 is fair: every hop has a generous timing window', () => {
++  // A bot that always runs and jumps immediately, started at every moment of the cycle.
++  // It must succeed from a good share of them, so a human who waits and watches has plenty of room.
++  for (const [a, b] of hops) {
++    it(`${a} -> ${b}: at least 25% of start moments work`, () => {
++      expect(windowFraction(a, b)).toBeGreaterThanOrEqual(0.25);
++    });
++  }
++
++  it('there is not a single hop that is always trivial for all three movers (timing still matters somewhere)', () => {
++    const fractions = hops.map(([a, b]) => windowFraction(a, b));
++    expect(fractions.some((f) => f < 0.95)).toBe(true);
++  });
++
++  it('M1 and M2 are out of step, so crossing from one to the other needs a look first', () => {
++    expect(windowFraction('M1', 'M2')).toBeLessThan(0.95);
++  });
++});
+diff --git a/lanternfall/tests/helpers/room3Sim.ts b/lanternfall/tests/helpers/room3Sim.ts
+new file mode 100644
+index 0000000..3f6d2dc
+--- /dev/null
++++ b/lanternfall/tests/helpers/room3Sim.ts
+@@ -0,0 +1,88 @@
++import { PLAYER_HALF, PlayerBody } from '../../src/physics/PlayerBody';
++import { Lantern, RevealTracker } from '../../src/world/LightReveal';
++import { MOVERS, MoverDef, PLATFORMS, platformBox } from '../../src/world/LevelData';
++import { applyMovers, cycleLength, moverBox, moverTop } from '../../src/world/MovingPlatform';
++
++/** Same fixed step the game uses. */
++export const STEP = 1 / 60;
++
++const staticBoxes = PLATFORMS.filter((p) => !p.hidden).map(platformBox);
++const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
++
++interface Spot {
++  x: number;
++  topY: number;
++  z: number;
++  w: number;
++  d: number;
++  mover: MoverDef | null;
++}
++
++export function spotOf(id: string, t: number, movers: readonly MoverDef[] = MOVERS): Spot {
++  const m = movers.find((q) => q.id === id);
++  if (m) return { ...moverTop(m, t), w: m.w, d: m.d, mover: m };
++  const p = PLATFORMS.find((q) => q.id === id);
++  if (!p) throw new Error(`Unknown platform ${id}`);
++  return { x: p.cx, topY: p.topY, z: p.cz, w: p.w, d: p.d, mover: null };
++}
++
++/**
++ * A bot that stands on `fromId` at time t0, runs toward -Z, jumps at the edge and steers at `toId`.
++ * It pulses the lantern first when the target is a hidden (dark) mover.
++ * Returns true if it lands on the target.
++ */
++export function runHop(fromId: string, toId: string, t0: number, movers: readonly MoverDef[] = MOVERS): boolean {
++  const from = spotOf(fromId, t0, movers);
++  const target0 = spotOf(toId, t0, movers);
++  const run = from.d >= 4 ? 2 : 1;
++  const x0 = from.mover ? from.x : clamp(target0.x, from.x - (from.w / 2 - 0.5), from.x + (from.w / 2 - 0.5));
++  const body = new PlayerBody({ x: x0, y: from.topY + PLAYER_HALF.y + 0.01, z: from.z - from.d / 2 + run });
++
++  const reveal = new RevealTracker();
++  const lantern = new Lantern();
++  const hiddenNow = (t: number) => movers.filter((m) => m.hidden).map((m) => ({ id: m.id, box: moverBox(m, t) }));
++  const isDark = (id: string) => movers.some((m) => m.id === id && m.hidden);
++  let t = t0;
++
++  const tick = (jump: boolean, mx: number, mz: number): void => {
++    const prev = t;
++    t += STEP;
++    lantern.update(STEP);
++    reveal.update(STEP, hiddenNow(t), { x: body.pos.x, y: body.feetY + 1.3, z: body.pos.z }, lantern.radius);
++    const boxes = applyMovers(body, movers, prev, t, (id) => !isDark(id) || reveal.isSolid(id));
++    body.step(STEP, { moveX: mx, moveZ: mz, jumpPressed: jump }, [...staticBoxes, ...boxes]);
++  };
++
++  for (let i = 0; i < 10; i++) tick(false, 0, 0); // settle (a dark source lights up under our feet)
++  if (isDark(toId)) lantern.tryPulse();
++
++  let jumped = false;
++  for (let i = 0; i < 4 / STEP; i++) {
++    const target = spotOf(toId, t, movers);
++    const here = spotOf(fromId, t, movers);
++    const atEdge = body.pos.z - (here.z - here.d / 2) <= 0.1;
++    const wantJump = !jumped && body.grounded && atEdge;
++    if (wantJump) jumped = true;
++    tick(wantJump, clamp((target.x - body.pos.x) * 2, -1, 1), -1);
++    if (jumped && body.grounded) {
++      const end = spotOf(toId, t, movers);
++      return Math.abs(body.pos.x - end.x) <= end.w / 2 && Math.abs(body.pos.z - end.z) <= end.d / 2 && Math.abs(body.feetY - end.topY) < 0.06;
++    }
++    if (body.pos.y < Math.min(from.topY, target.topY) - 5) return false;
++  }
++  return false;
++}
++
++/** Fraction of start moments (spread over one full cycle) from which the hop succeeds. */
++export function windowFraction(fromId: string, toId: string, movers: readonly MoverDef[] = MOVERS, stepSeconds = 0.2): number {
++  const involved = movers.filter((m) => m.id === fromId || m.id === toId);
++  const cycle = Math.max(...involved.map(cycleLength), 1);
++  let ok = 0;
++  let n = 0;
++  for (let t0 = 0; t0 < cycle; t0 += stepSeconds) {
++    n++;
++    if (runHop(fromId, toId, t0, movers)) ok++;
++  }
++  return ok / n;
++}
++
+-- 
+2.43.0
+

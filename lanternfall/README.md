@@ -2,6 +2,10 @@
 
 A low-poly puzzle-platformer. Hidden platforms exist only where your lantern's light reaches.
 
+Play online: https://obig20.github.io/Lanternfall_Games/
+To play locally: 
+pm install && npm run dev then open http://localhost:5173
+
 Rooms: **The Lantern Steps** (hidden stones), **The Beacon Span** (crystal-locked bridge), **The Drifting Gallery** (moving and dark platforms, plus a lift).
 
 ## Run
@@ -80,3 +84,4 @@ Rendering, HUD, audio, touch controls and the feel of the game are **not** cover
 
 ## History
 The first 25 commits are batch updates ("Update 1" to "Update 19") plus documentation. From the camera-collision commit onward each feature is its own commit with a descriptive message. See AI-DISCLOSURE.md for who wrote what.
+
