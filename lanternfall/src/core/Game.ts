@@ -17,6 +17,7 @@ import {
 import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
+import { AchievementBook } from './Achievements';
 import { GhostRecorder, GhostStore, GhostTrack, sampleGhost } from './Ghost';
 import { HintEngine } from './Hints';
 import { ProgressStore } from './Progress';
@@ -64,6 +65,7 @@ export class Game {
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
   private readonly hints = new HintEngine(browserStore());
+  private readonly achievements = new AchievementBook(browserStore());
   private readonly ghostStore = new GhostStore(browserStore());
   private readonly ghostRecorder = new GhostRecorder();
   /** Best run so far, shown as a translucent runner. Null until a full run has been finished. */
@@ -126,6 +128,7 @@ export class Game {
     this.applySettings(this.settings.get());
     this.hud.setSettings(this.settings.get());
     this.refreshContinue();
+    this.hud.setAchievementProgress(this.achievements.count, this.achievements.total);
     this.hud.showTitle(true);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -267,6 +270,7 @@ export class Game {
     this.progress.clear();
     this.refreshContinue();
     let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
+    let unlocked: string[] = [];
     if (!this.stats.continued) {
       const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
       const { bestTime, fewestFalls } = out.record;
@@ -279,10 +283,14 @@ export class Game {
           bestLine += '  ·  Ghost saved';
         }
       }
+      unlocked = this.achievements
+        .evaluate({ time: this.stats.time, falls: this.stats.falls, pulses: this.pulsesFired, totalRuns: out.record.runs })
+        .map((a) => a.title);
+      this.hud.setAchievementProgress(this.achievements.count, this.achievements.total);
       if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
       else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
     }
-    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine);
+    this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine, unlocked);
   }
 
   // --- main loop -------------------------------------------------------------

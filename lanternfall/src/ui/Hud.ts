@@ -34,6 +34,7 @@ export class Hud {
             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
           </ul>
           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
+          <p id="title-achievements" class="how"></p>
           <button id="btn-continue" class="hidden">Continue</button>
           <button id="btn-start">Begin</button>
         </div>
@@ -73,6 +74,7 @@ export class Hud {
           <p class="tag">You found the light's path through the ruins.</p>
           <p id="win-stats"></p>
           <p id="win-best" class="best"></p>
+          <p id="win-achievements" class="best"></p>
           <button id="btn-restart">Play again</button>
         </div>
       </div>
@@ -121,6 +123,11 @@ export class Hud {
 
   showTitle(on: boolean): void { this.show('#title-screen', on); }
 
+  /** Small line on the title screen such as "Achievements 2 of 7". Hidden when nothing is earned yet. */
+  setAchievementProgress(earned: number, total: number): void {
+    this.q('#title-achievements').textContent = earned > 0 ? `Achievements ${earned} of ${total}` : '';
+  }
+
   /** Show the Continue button with a label such as "Continue (checkpoint 2 of 4)", or hide it with null. */
   setContinue(label: string | null): void {
     this.show('#btn-continue', label !== null);
@@ -130,13 +137,14 @@ export class Hud {
   showPause(on: boolean): void { this.show('#pause-screen', on); }
 
   /** `bestLine` is a second line such as "New best time!" or "Best 1:20.4 · fewest falls 2". */
-  showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = ''): void {
+  showWin(on: boolean, seconds = 0, falls = 0, toughest = '', bestLine = '', unlocked: readonly string[] = []): void {
     if (on) {
       const m = Math.floor(seconds / 60);
       const s = Math.floor(seconds % 60).toString().padStart(2, '0');
       const extra = toughest ? `  ·  Most falls: ${toughest}` : '';
       this.q('#win-stats').textContent = `Time ${m}:${s}  ·  Falls ${falls}${extra}`;
       this.q('#win-best').textContent = bestLine;
+      this.q('#win-achievements').textContent = unlocked.length > 0 ? `Unlocked: ${unlocked.join(', ')}` : '';
     }
     this.show('#win-screen', on);
   }
