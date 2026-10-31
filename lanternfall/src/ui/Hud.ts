@@ -3,6 +3,7 @@ import { SETTING_LIMITS, Settings } from '../core/Settings';
 /** All on-screen text and buttons. Plain DOM (no framework) so it is easy to read and change. */
 export class Hud {
   onStart: () => void = () => {};
+  onContinue: () => void = () => {};
   onResume: () => void = () => {};
   onRestart: () => void = () => {};
   onSettings: (patch: Partial<Settings>) => void = () => {};
@@ -29,6 +30,7 @@ export class Hud {
             <li><b>R</b> back to checkpoint &nbsp; <b>Esc</b> pause &nbsp; <b>M</b> mute</li>
           </ul>
           <p class="how">Hidden platforms appear only where your lantern's light reaches.<br>Cross the ruins and reach the golden gate.</p>
+          <button id="btn-continue" class="hidden">Continue</button>
           <button id="btn-start">Begin</button>
         </div>
       </div>
@@ -73,6 +75,7 @@ export class Hud {
     parent.appendChild(this.root);
 
     this.q('#btn-start').addEventListener('click', this.start);
+    this.q('#btn-continue').addEventListener('click', this.continueRun);
     this.q('#btn-resume').addEventListener('click', this.resume);
     this.q('#btn-restart').addEventListener('click', this.restart);
     for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).addEventListener('input', this.settingsInput);
@@ -94,6 +97,7 @@ export class Hud {
   }
 
   private start = (): void => this.onStart();
+  private continueRun = (): void => this.onContinue();
   private resume = (): void => this.onResume();
   private restart = (): void => this.onRestart();
 
@@ -102,6 +106,12 @@ export class Hud {
   }
 
   showTitle(on: boolean): void { this.show('#title-screen', on); }
+
+  /** Show the Continue button with a label such as "Continue (checkpoint 2 of 4)", or hide it with null. */
+  setContinue(label: string | null): void {
+    this.show('#btn-continue', label !== null);
+    if (label !== null) this.q('#btn-continue').textContent = label;
+  }
   showHud(on: boolean): void { this.show('#hud', on); }
   showPause(on: boolean): void { this.show('#pause-screen', on); }
 
@@ -151,6 +161,7 @@ export class Hud {
     window.clearTimeout(this.toastTimer);
     window.clearTimeout(this.flashTimer);
     this.q('#btn-start').removeEventListener('click', this.start);
+    this.q('#btn-continue').removeEventListener('click', this.continueRun);
     this.q('#btn-resume').removeEventListener('click', this.resume);
     this.q('#btn-restart').removeEventListener('click', this.restart);
     for (const id of ['#set-volume', '#set-sens', '#set-invert']) this.q(id).removeEventListener('input', this.settingsInput);

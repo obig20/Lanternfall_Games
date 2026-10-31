@@ -17,6 +17,7 @@ import {
 import { applyMovers, moverTop, moverUnder } from '../world/MovingPlatform';
 import { EventBus } from './EventBus';
 import { FallLog } from './FallLog';
+import { ProgressStore } from './Progress';
 import { Records, formatTime } from './Records';
 import { SettingsStore } from './Settings';
 import { browserStore } from './storage';
@@ -59,12 +60,14 @@ export class Game {
   private readonly resizeObserver: ResizeObserver;
   private readonly settings = new SettingsStore(browserStore());
   private readonly records = new Records(browserStore());
+  private readonly progress = new ProgressStore(browserStore(), CHECKPOINTS.length);
   private unsubscribeSettings: () => void = () => {};
   private readonly touch: TouchControls | null;
 
   private respawnPoint: { x: number; y: number; z: number } = { ...SPAWN };
   private activeCheckpoint: string | null = null;
-  private stats = { time: 0, falls: 0 };
+  /** `continued` runs started from a saved checkpoint, so their times are not comparable and never become records. */
+  private stats = { time: 0, falls: 0, continued: false };
   private accumulator = 0;
   /** Simulation clock for moving platforms: advances only while playing. */
   private moverTime = 0;
@@ -94,13 +97,15 @@ export class Game {
 
     this.hud = new Hud(container);
     this.touch = TouchControls.isSupported() ? new TouchControls(container, () => this.togglePause()) : null;
-    this.hud.onStart = () => this.begin();
+    this.hud.onStart = () => this.startFresh();
+    this.hud.onContinue = () => this.continueRun();
     this.hud.onResume = () => this.togglePause();
     this.hud.onRestart = () => this.restart();
     this.hud.onSettings = (patch) => this.settings.set(patch);
     this.unsubscribeSettings = this.settings.onChange((v) => this.applySettings(v));
     this.applySettings(this.settings.get());
     this.hud.setSettings(this.settings.get());
+    this.refreshContinue();
     this.hud.showTitle(true);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -131,6 +136,41 @@ export class Game {
   }
 
   // --- flow ------------------------------------------------------------------
+  /** Begin from the very start. Any saved progress is dropped, because a new run replaces it. */
+  private startFresh(): void {
+    this.progress.clear();
+    this.refreshContinue();
+    this.begin();
+  }
+
+  /** Resume at the furthest checkpoint reached. Such a run is marked `continued` and never saves a record. */
+  private continueRun(): void {
+    const index = this.progress.furthestCheckpoint;
+    const c = CHECKPOINTS[index];
+    if (!c) {
+      this.startFresh();
+      return;
+    }
+    this.activeCheckpoint = c.id;
+    this.respawnPoint = respawnPosition(c);
+    this.level.setActiveCheckpoint(c.id);
+    this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
+    this.applyCheckpointObjective(c.id);
+    this.stats = { time: 0, falls: 0, continued: true };
+    this.placePlayer();
+    this.begin();
+  }
+
+  private refreshContinue(): void {
+    const i = this.progress.furthestCheckpoint;
+    this.hud.setContinue(this.progress.canContinue ? `Continue (checkpoint ${i + 1} of ${CHECKPOINTS.length})` : null);
+  }
+
+  private applyCheckpointObjective(id: string): void {
+    if (id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
+    if (id === 'C3' || id === 'C4') this.hud.setObjective(OBJ_GALLERY);
+  }
+
   private begin(): void {
     this.audio.unlock(); // browsers require a user click before audio can play
     if (this.state.transition('playing')) {
@@ -157,7 +197,9 @@ export class Game {
     this.beaconsActive.clear();
     this.hud.setObjective(OBJ_START);
     this.hud.setCheckpoint('start');
-    this.stats = { time: 0, falls: 0 };
+    this.stats = { time: 0, falls: 0, continued: false };
+    this.progress.clear();
+    this.refreshContinue();
     this.moverTime = 0;
     this.fallLog.reset();
     this.placePlayer();
@@ -192,11 +234,16 @@ export class Game {
     const p = this.player.body.pos;
     this.sparkles.burst(p.x, p.y, p.z, 120, GOLD, 5, 4);
     const worst = this.fallLog.worst();
-    const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
-    const { bestTime, fewestFalls } = out.record;
-    let bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
-    if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
-    else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
+    this.progress.clear();
+    this.refreshContinue();
+    let bestLine = 'Continued from a checkpoint, so this run is not saved as a record.';
+    if (!this.stats.continued) {
+      const out = this.records.submit(RUN_ID, { time: this.stats.time, falls: this.stats.falls });
+      const { bestTime, fewestFalls } = out.record;
+      bestLine = `Best ${formatTime(bestTime ?? this.stats.time)}  ·  Fewest falls ${fewestFalls ?? this.stats.falls}`;
+      if (out.newBestTime) bestLine = `New best time!  ${bestLine}`;
+      else if (out.newBestFalls) bestLine = `New fewest falls!  ${bestLine}`;
+    }
     this.hud.showWin(true, this.stats.time, this.stats.falls, worst ? `leaving ${worst.id} (${worst.count} falls)` : '', bestLine);
   }
 
@@ -334,8 +381,8 @@ export class Game {
     this.sparkles.burst(c.x, c.y + 1, c.z, 40, GOLD, 3, 3);
     this.hud.setCheckpoint(`${index + 1} of ${CHECKPOINTS.length}`);
     this.hud.toast('Checkpoint reached');
-    if (c.id === 'C2' && this.beaconsActive.size === 0) this.hud.setObjective(OBJ_BEACON);
-    if (c.id === 'C3') this.hud.setObjective(OBJ_GALLERY);
+    if (this.progress.reach(index)) this.refreshContinue();
+    this.applyCheckpointObjective(c.id);
   }
 
   /** A pulse reached a crystal: wake it and make its bridge permanently solid. */
